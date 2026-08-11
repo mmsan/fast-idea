@@ -1,0 +1,405 @@
+package com.mirror.ideafocusbridge;
+
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.intellij.openapi.application.ApplicationInfo;
+import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.editor.Editor;
+import com.intellij.openapi.editor.LogicalPosition;
+import com.intellij.openapi.editor.ScrollType;
+import com.intellij.openapi.fileEditor.FileDocumentManager;
+import com.intellij.openapi.fileEditor.FileEditorManager;
+import com.intellij.openapi.fileEditor.OpenFileDescriptor;
+import com.intellij.openapi.project.Project;
+import com.intellij.openapi.project.ProjectManager;
+import com.intellij.openapi.vfs.LocalFileSystem;
+import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.openapi.wm.IdeFocusManager;
+import com.intellij.openapi.wm.WindowManager;
+import com.sun.jna.Native;
+import com.sun.jna.Pointer;
+
+import javax.swing.SwingUtilities;
+import java.awt.Dialog;
+import java.awt.Frame;
+import java.awt.KeyboardFocusManager;
+import java.awt.Rectangle;
+import java.awt.Window;
+import java.net.URI;
+import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
+
+final class BridgeCommands {
+    private BridgeCommands() {}
+
+    static Map<String, Object> identity() {
+        List<Map<String, Object>> projects = new ArrayList<>();
+        for (Project project : ProjectManager.getInstance().getOpenProjects()) {
+            projects.add(projectIdentity(project));
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("client", "fast-idea-bridge");
+        FocusBridgeService service = FocusBridgeService.getInstance();
+        payload.put("clientId", FocusBridgeSettings.getInstance().data().installationId);
+        payload.put("installationId", FocusBridgeSettings.getInstance().data().installationId);
+        payload.put("instanceId", service.instanceId());
+        payload.put("connectionId", service.connectionId());
+        payload.put("ide", ApplicationInfo.getInstance().getFullApplicationName());
+        payload.put("build", ApplicationInfo.getInstance().getBuild().asString());
+        payload.put("pluginVersion", "0.1.0"); payload.put("projects", projects);
+        payload.put("processId", ProcessHandle.current().pid());
+        payload.put("nativeWindows", nativeWindows());
+        payload.put("capabilities", List.of("state", "navigate", "select", "find", "requestFocus", "listProjects"));
+        return payload;
+    }
+
+    private static Map<String, Object> nativeWindows() {
+        Map<String, Object> result = new LinkedHashMap<>();
+        if (!System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("windows")) {
+            result.put("supported", false);
+            return result;
+        }
+        Window active = KeyboardFocusManager.getCurrentKeyboardFocusManager().getActiveWindow();
+        List<Map<String, Object>> windows = new ArrayList<>();
+        String activeHandle = null;
+        for (Window window : Window.getWindows()) {
+            if (!window.isDisplayable() || !window.isShowing()) continue;
+            try {
+                Pointer pointer = Native.getComponentPointer(window);
+                long handle = Pointer.nativeValue(pointer);
+                if (handle == 0) continue;
+                String decimal = Long.toUnsignedString(handle);
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("handle", decimal);
+                item.put("handleHex", "0x" + Long.toUnsignedString(handle, 16).toUpperCase(Locale.ROOT));
+                item.put("active", window == active);
+                item.put("className", window.getClass().getName());
+                item.put("title", window instanceof Frame frame ? frame.getTitle()
+                        : window instanceof Dialog dialog ? dialog.getTitle() : null);
+                Rectangle bounds = window.getBounds();
+                item.put("bounds", Map.of("x", bounds.x, "y", bounds.y,
+                        "width", bounds.width, "height", bounds.height));
+                windows.add(item);
+                if (window == active) activeHandle = decimal;
+            } catch (RuntimeException ignored) { }
+        }
+        result.put("supported", true);
+        result.put("activeWindowHandle", activeHandle);
+        result.put("windows", windows);
+        result.put("format", "unsigned decimal string; handleHex is provided for diagnostics");
+        return result;
+    }
+
+    static Map<String, Object> source(String instanceId, String connectionId, Object payload) {
+        Map<String, Object> source = new LinkedHashMap<>();
+        source.put("installationId", FocusBridgeSettings.getInstance().data().installationId);
+        source.put("instanceId", instanceId);
+        source.put("connectionId", connectionId);
+        source.put("projects", openProjectIdentities());
+        if (payload instanceof Map<?, ?> map && map.get("activeEditor") instanceof Map<?, ?> editor
+                && editor.get("project") instanceof Map<?, ?> project) {
+            Object basePath = project.get("basePath");
+            if (basePath instanceof String base && !base.isBlank()) {
+                source.put("projectId", projectId(base));
+                source.put("projectName", project.get("name"));
+                source.put("projectBasePath", base);
+            }
+        }
+        return source;
+    }
+
+    private static List<Map<String, Object>> openProjectIdentities() {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Project project : ProjectManager.getInstance().getOpenProjects()) result.add(projectIdentity(project));
+        return result;
+    }
+
+    private static Map<String, Object> projectIdentity(Project project) {
+        String basePath = Objects.toString(project.getBasePath(), "");
+        return Map.of("projectId", projectId(basePath), "name", project.getName(), "basePath", basePath);
+    }
+
+    static String projectId(String basePath) {
+        String normalized = basePath.isBlank() ? "" : Path.of(basePath).toAbsolutePath().normalize()
+                .toString().toLowerCase(Locale.ROOT);
+        return UUID.nameUUIDFromBytes(normalized.getBytes(StandardCharsets.UTF_8)).toString();
+    }
+
+    static void handle(String raw, FocusBridgeService bridge) {
+        String id = null;
+        try {
+            JsonObject message = JsonParser.parseString(raw).getAsJsonObject();
+            id = string(message, "id", null);
+            String type = string(message, "type", "");
+            JsonObject payload = message.has("payload") && message.get("payload").isJsonObject()
+                    ? message.getAsJsonObject("payload") : new JsonObject();
+            JsonObject target = message.has("target") && message.get("target").isJsonObject()
+                    ? message.getAsJsonObject("target") : new JsonObject();
+            if (!validateInstanceTarget(type, target, bridge)) return;
+            String commandId = id;
+            switch (type) {
+                case "command.ping" -> bridge.send("command.result", Map.of("success", true, "command", type), id);
+                case "command.getState" -> ApplicationManager.getApplication().invokeLater(() ->
+                        bridge.send("command.result", result(true, type, FocusSnapshotCollector.collect()), commandId));
+                case "command.listProjects" -> bridge.send("command.result", result(true, type, identity().get("projects")), id);
+                case "command.navigate", "command.select" ->
+                        ApplicationManager.getApplication().invokeLater(() -> navigate(type, payload, target, commandId, bridge));
+                case "command.find" ->
+                        ApplicationManager.getApplication().invokeLater(() -> find(payload, target, commandId, bridge));
+                case "command.requestFocus" -> ApplicationManager.getApplication().invokeLater(() -> requestFocus(commandId, bridge));
+                default -> bridge.send("command.result", error(type, "UNKNOWN_COMMAND", "Unsupported command: " + type), id);
+            }
+        } catch (RuntimeException e) {
+            bridge.send("command.result", error("unknown", "INVALID_MESSAGE", e.getMessage()), id);
+        }
+    }
+
+    private static boolean validateInstanceTarget(String type, JsonObject target, FocusBridgeService bridge) {
+        String targetInstance = string(target, "instanceId", null);
+        boolean mutating = type.equals("command.navigate") || type.equals("command.select")
+                || type.equals("command.find") || type.equals("command.requestFocus");
+        if (mutating && (targetInstance == null || targetInstance.isBlank())) {
+            throw new IllegalArgumentException("target.instanceId is required for this command");
+        }
+        return targetInstance == null || targetInstance.equals(bridge.instanceId());
+    }
+
+    private static void requestFocus(String id, FocusBridgeService bridge) {
+        for (Project project : ProjectManager.getInstance().getOpenProjects()) {
+            Editor editor = FileEditorManager.getInstance(project).getSelectedTextEditor();
+            if (editor != null) {
+                activateEditorWindow(editor);
+                bridge.send("command.result", result(true, "command.requestFocus", Map.of("project", project.getName())), id);
+                return;
+            }
+        }
+        bridge.send("command.result", error("command.requestFocus", "NO_EDITOR", "No active text editor"), id);
+    }
+
+    private static void navigate(String type, JsonObject payload, JsonObject targetIdentity, String id, FocusBridgeService bridge) {
+        try {
+            Target target = resolveTarget(payload, targetIdentity);
+            int base = integer(payload, "coordinateBase", 0);
+            boolean hasLine = hasValue(payload, "line");
+            boolean hasColumn = hasValue(payload, "column");
+            OpenFileDescriptor descriptor = new OpenFileDescriptor(target.project, target.file);
+            Editor editor = FileEditorManager.getInstance(target.project).openTextEditor(descriptor, true);
+            if (editor == null) throw new IllegalStateException("File is not a text editor");
+
+            activateEditorWindow(editor);
+
+            if ("command.navigate".equals(type) && (hasLine || hasColumn)) {
+                LogicalPosition current = editor.getCaretModel().getLogicalPosition();
+                int requestedLine = hasLine ? integer(payload, "line", base) - base : current.line;
+                int requestedColumn = hasColumn ? integer(payload, "column", base) - base : current.column;
+                int line = Math.max(0, Math.min(requestedLine, Math.max(0, lineCount(target.file) - 1)));
+                editor.getCaretModel().moveToLogicalPosition(new LogicalPosition(line, Math.max(0, requestedColumn)));
+                editor.getScrollingModel().scrollToCaret(ScrollType.CENTER);
+            }
+
+            if ("command.select".equals(type)) {
+                Position start = position(payload.getAsJsonObject("start"), editor, base);
+                Position end = position(payload.getAsJsonObject("end"), editor, base);
+                editor.getSelectionModel().setSelection(start.offset, end.offset);
+                editor.getCaretModel().moveToOffset(end.offset);
+                editor.getScrollingModel().scrollToCaret(ScrollType.CENTER);
+            }
+            bridge.send("command.result", result(true, type, Map.of("path", target.file.getPath(),
+                    "line", editor.getCaretModel().getLogicalPosition().line,
+                    "column", editor.getCaretModel().getLogicalPosition().column)), id);
+        } catch (RuntimeException e) {
+            bridge.send("command.result", error(type, "NAVIGATION_FAILED", Objects.toString(e.getMessage(), e.getClass().getSimpleName())), id);
+        }
+    }
+
+    private static void find(JsonObject payload, JsonObject targetIdentity, String id, FocusBridgeService bridge) {
+        try {
+            String query = string(payload, "query", null);
+            if (query == null || query.isEmpty()) throw new IllegalArgumentException("payload.query is required");
+
+            Target target = resolveSearchTarget(payload, targetIdentity);
+            var document = FileDocumentManager.getInstance().getDocument(target.file);
+            if (document == null) throw new IllegalStateException("File is not a text document");
+
+            boolean caseSensitive = bool(payload, "caseSensitive", false);
+            boolean regex = bool(payload, "regex", false);
+            boolean select = bool(payload, "select", false);
+            int startOffset = Math.max(0, Math.min(integer(payload, "startOffset", 0), document.getTextLength()));
+            Match match = findFirst(document.getCharsSequence(), query, caseSensitive, regex, startOffset);
+            if (match == null) {
+                bridge.send("command.result", error("command.find", "NOT_FOUND", "No match found"), id);
+                return;
+            }
+
+            int line = document.getLineNumber(match.start);
+            int column = match.start - document.getLineStartOffset(line);
+            OpenFileDescriptor descriptor = new OpenFileDescriptor(target.project, target.file, line, column);
+            Editor editor = FileEditorManager.getInstance(target.project).openTextEditor(descriptor, true);
+            if (editor == null) throw new IllegalStateException("File is not a text editor");
+
+            activateEditorWindow(editor);
+            if (select) {
+                editor.getSelectionModel().setSelection(match.start, match.end);
+            } else {
+                editor.getSelectionModel().removeSelection();
+                editor.getCaretModel().moveToOffset(match.start);
+            }
+            editor.getScrollingModel().scrollToCaret(ScrollType.CENTER);
+
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("path", target.file.getPath());
+            data.put("startOffset", match.start);
+            data.put("endOffset", match.end);
+            data.put("line", line);
+            data.put("column", column);
+            data.put("lineNumber", line + 1);
+            data.put("columnNumber", column + 1);
+            data.put("caseSensitive", caseSensitive);
+            data.put("regex", regex);
+            data.put("selected", select);
+            bridge.send("command.result", result(true, "command.find", data), id);
+        } catch (PatternSyntaxException e) {
+            bridge.send("command.result", error("command.find", "INVALID_QUERY", e.getDescription()), id);
+        } catch (RuntimeException e) {
+            bridge.send("command.result", error("command.find", "FIND_FAILED",
+                    Objects.toString(e.getMessage(), e.getClass().getSimpleName())), id);
+        }
+    }
+
+    private static Target resolveSearchTarget(JsonObject payload, JsonObject targetIdentity) {
+        String requested = string(payload, "path", null);
+        if (requested != null && !requested.isBlank()) return resolveTarget(payload, targetIdentity);
+
+        String requestedProject = string(payload, "projectBasePath", null);
+        if (requestedProject == null) requestedProject = string(targetIdentity, "projectBasePath", null);
+        String requestedProjectId = string(targetIdentity, "projectId", null);
+        for (Project project : ProjectManager.getInstance().getOpenProjects()) {
+            String baseText = project.getBasePath();
+            if (baseText == null || requestedProject != null
+                    && !pathOf(baseText).normalize().equals(pathOf(requestedProject).normalize())) continue;
+            if (requestedProjectId != null && !requestedProjectId.equals(projectId(baseText))) continue;
+            Editor editor = FileEditorManager.getInstance(project).getSelectedTextEditor();
+            if (editor != null && editor.getVirtualFile() != null) {
+                return new Target(project, editor.getVirtualFile());
+            }
+        }
+        throw new IllegalArgumentException("payload.path is required when there is no active text editor");
+    }
+
+    private static Match findFirst(CharSequence text, String query, boolean caseSensitive,
+                                   boolean regex, int startOffset) {
+        if (regex) {
+            int flags = caseSensitive ? 0 : Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE;
+            Matcher matcher = Pattern.compile(query, flags).matcher(text);
+            if (matcher.find(startOffset)) return new Match(matcher.start(), matcher.end());
+            return null;
+        }
+        if (caseSensitive) {
+            int index = text.toString().indexOf(query, startOffset);
+            return index < 0 ? null : new Match(index, index + query.length());
+        }
+        for (int index = startOffset; index + query.length() <= text.length(); index++) {
+            if (text.toString().regionMatches(true, index, query, 0, query.length())) {
+                return new Match(index, index + query.length());
+            }
+        }
+        return null;
+    }
+
+    private static void activateEditorWindow(Editor editor) {
+        var component = editor.getContentComponent();
+        Project project = editor.getProject();
+        Window window = project == null ? null : WindowManager.getInstance().getFrame(project);
+        if (window == null) window = SwingUtilities.getWindowAncestor(component);
+        if (window != null) {
+            if (window instanceof Frame frame && (frame.getExtendedState() & Frame.ICONIFIED) != 0) {
+                frame.setExtendedState(frame.getExtendedState() & ~Frame.ICONIFIED);
+            }
+            window.setVisible(true);
+            window.toFront();
+            window.requestFocus();
+        }
+        if (project != null) {
+            IdeFocusManager.getInstance(project).requestFocus(component, true);
+        } else {
+            component.requestFocusInWindow();
+        }
+    }
+
+    private static Target resolveTarget(JsonObject payload, JsonObject targetIdentity) {
+        String requested = string(payload, "path", null);
+        if (requested == null || requested.isBlank()) throw new IllegalArgumentException("payload.path is required");
+        String requestedProject = string(payload, "projectBasePath", null);
+        if (requestedProject == null) requestedProject = string(targetIdentity, "projectBasePath", null);
+        String requestedProjectId = string(targetIdentity, "projectId", null);
+        for (Project project : ProjectManager.getInstance().getOpenProjects()) {
+            String baseText = project.getBasePath();
+            if (baseText == null || requestedProject != null && !pathOf(baseText).normalize().equals(pathOf(requestedProject).normalize())) continue;
+            if (requestedProjectId != null && !requestedProjectId.equals(projectId(baseText))) continue;
+            Path base = Path.of(baseText).toAbsolutePath().normalize();
+            Path candidate = pathOf(requested);
+            if (!candidate.isAbsolute()) candidate = base.resolve(candidate);
+            candidate = candidate.toAbsolutePath().normalize();
+            if (!candidate.startsWith(base)) continue;
+            VirtualFile file = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(candidate);
+            if (file != null && !file.isDirectory()) return new Target(project, file);
+        }
+        throw new IllegalArgumentException("File was not found inside an open project");
+    }
+
+    private static Path pathOf(String value) {
+        String normalized = value.trim();
+        if (normalized.regionMatches(true, 0, "file:", 0, 5)) {
+            return Path.of(URI.create(normalized));
+        }
+        // Accept file URLs converted to /C:/... by a non-Windows caller.
+        if (normalized.matches("^/[A-Za-z]:[\\\\/].*")) {
+            normalized = normalized.substring(1);
+        }
+        return Path.of(normalized);
+    }
+
+    private static Position position(JsonObject object, Editor editor, int base) {
+        if (object == null) throw new IllegalArgumentException("Selection start/end is required");
+        int maxLine = Math.max(0, editor.getDocument().getLineCount() - 1);
+        int line = Math.max(0, Math.min(integer(object, "line", base) - base, maxLine));
+        int lineStart = editor.getDocument().getLineStartOffset(line);
+        int lineEnd = editor.getDocument().getLineEndOffset(line);
+        int offset = Math.min(lineEnd, lineStart + Math.max(0, integer(object, "column", base) - base));
+        return new Position(offset);
+    }
+
+    private static int lineCount(VirtualFile file) {
+        var document = com.intellij.openapi.fileEditor.FileDocumentManager.getInstance().getDocument(file);
+        return document == null ? 1 : document.getLineCount();
+    }
+
+    private static boolean hasValue(JsonObject object, String key) {
+        return object.has(key) && !object.get(key).isJsonNull();
+    }
+
+    private static Map<String, Object> result(boolean success, String command, Object data) {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("success", success); value.put("command", command); value.put("data", data); return value;
+    }
+    private static Map<String, Object> error(String command, String code, String message) {
+        return Map.of("success", false, "command", Objects.toString(command, "unknown"),
+                "error", Map.of("code", code, "message", Objects.toString(message, "Unknown error")));
+    }
+    private static String string(JsonObject o, String key, String fallback) {
+        return o.has(key) && !o.get(key).isJsonNull() ? o.get(key).getAsString() : fallback;
+    }
+    private static int integer(JsonObject o, String key, int fallback) {
+        return o.has(key) && !o.get(key).isJsonNull() ? o.get(key).getAsInt() : fallback;
+    }
+    private static boolean bool(JsonObject o, String key, boolean fallback) {
+        return o.has(key) && !o.get(key).isJsonNull() ? o.get(key).getAsBoolean() : fallback;
+    }
+    private record Target(Project project, VirtualFile file) {}
+    private record Position(int offset) {}
+    private record Match(int start, int end) {}
+}

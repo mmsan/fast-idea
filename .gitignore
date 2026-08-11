@@ -1,0 +1,8 @@
+.gradle/
+.intellijPlatform/
+.gradle-dist/
+gradle-*-bin.zip
+.idea/
+build/
+out/
+*.iml

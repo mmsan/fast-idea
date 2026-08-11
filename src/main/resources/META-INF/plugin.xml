@@ -1,0 +1,19 @@
+<idea-plugin>
+    <id>com.mirror.ideafocusbridge</id>
+    <name>Fast Idea Bridge</name>
+    <vendor>Mirror</vendor>
+    <description><![CDATA[
+        Connects JetBrains IDE focus, editor, caret and selection state with the Fast application over WebSocket, and accepts safe navigation commands from Fast.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <postStartupActivity implementation="com.mirror.ideafocusbridge.FocusBridgeStartupActivity"/>
+        <applicationConfigurable
+                parentId="tools"
+                id="com.mirror.ideafocusbridge.settings"
+                displayName="Fast Idea Bridge"
+                instance="com.mirror.ideafocusbridge.FocusBridgeConfigurable"/>
+    </extensions>
+</idea-plugin>
