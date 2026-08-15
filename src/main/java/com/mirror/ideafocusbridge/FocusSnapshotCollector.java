@@ -132,6 +132,19 @@ final class FocusSnapshotCollector {
         return caret.hasSelection() ? caret.getSelectedText() : "";
     }
 
+    static String currentLineContent() {
+        if (!FocusBridgeSettings.getInstance().data().sendText) return null;
+        Component focus = KeyboardFocusManager.getCurrentKeyboardFocusManager().getPermanentFocusOwner();
+        if (focus instanceof JTextComponent) return null;
+        Editor editor = editorFrom(focus);
+        if (editor == null || editor.isDisposed()) return null;
+
+        var document = editor.getDocument();
+        var caret = editor.getCaretModel().getPrimaryCaret();
+        int line = document.getLineNumber(Math.min(caret.getOffset(), document.getTextLength()));
+        return document.getText(new TextRange(document.getLineStartOffset(line), document.getLineEndOffset(line)));
+    }
+
     private static long editorOpenedAt(Editor editor) {
         if (editor == null || editor.isDisposed()) return 0;
         VirtualFile file = FileDocumentManager.getInstance().getFile(editor.getDocument());

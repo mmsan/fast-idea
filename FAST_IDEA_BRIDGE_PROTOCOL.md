@@ -439,6 +439,19 @@ IDEA Swing 焦点变化、键盘输入或鼠标输入后发送。消息正文是
 }
 ```
 
+### 5.2e `command.getCurrentLineContent`
+
+主动在插件 UI 线程读取当前获得编辑器焦点的代码行内容，不包含行尾换行符。成功响应的 `data` 是当前行文本；没有代码编辑器焦点、关闭 `sendText` 或没有可用编辑器时为 `null`。调用方如果要模拟真实 Ctrl+C 的整行结果，需要自行在该值后追加一个换行符。
+
+```json
+{
+  "id": "current-line-1",
+  "type": "command.getCurrentLineContent",
+  "target": {"instanceId": "bridge.hello 中的 instanceId"},
+  "payload": {}
+}
+```
+
 ### 5.3 `command.listProjects`
 
 ### 5.3a `command.isFullScreen`
@@ -900,9 +913,9 @@ const selectedText = await f.ideaFocusBridge.getCurrentSelectedText()
 - `getCurrentProjectName()`：返回当前 IDEA 编辑器所属项目名。
 - `getCurrentFilePath()`：返回当前 IDEA 编辑器文件的绝对路径。
 - `getCurrentLine()`：返回当前光标所在的 1-based 行号。
-- `getCurrentSelectedText()`：返回一个 Promise，主动读取当前选中的文本；没有选择时返回空字符串。
+- `getCurrentSelectedText()`：返回一个 Promise，主动读取当前编辑器或当前获得焦点的可编辑文本控件中的选中文本；没有选择时返回空字符串。
 
-如果 IDEA 未开启文本发送，或当前没有可用编辑器，`getCurrentSelectedText()` 返回 `null`。
+如果 IDEA 未开启文本发送、当前没有可用编辑器/输入控件，或焦点位于密码输入框，`getCurrentSelectedText()` 返回 `null`。
 
 上述四个快捷查询方法在当前窗口属于 IDEA/CLion、但没有连接 Fast Idea Bridge 时，会通过 `f.log(..., true)` 提示当前 IDE 窗口可能没有安装或启用 `Fast Idea Bridge` 插件；当前窗口不是 IDEA/CLion 时不会提示。提示采用 3 秒防抖。
 
@@ -922,6 +935,7 @@ editor.getCurrentFilePath()
 await editor.isLive()
 editor.isEditorFocused()
 editor.getCurrentLine()
+await editor.getCurrentLineContent()
 await editor.getCurrentSelectedText()
 editor.getCurrentEditor()
 editor.getCurrentInfo()           // 一次返回当前编辑器的常用信息

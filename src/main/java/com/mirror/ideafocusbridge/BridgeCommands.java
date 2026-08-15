@@ -146,6 +146,8 @@ final class BridgeCommands {
                         bridge.send("command.result", result(true, type, FocusSnapshotCollector.currentObjectInfo()), commandId));
                 case "command.getSelectedText" -> ApplicationManager.getApplication().invokeLater(() ->
                         bridge.send("command.result", result(true, type, FocusSnapshotCollector.currentSelectedText()), commandId));
+                case "command.getCurrentLineContent" -> ApplicationManager.getApplication().invokeLater(() ->
+                        bridge.send("command.result", result(true, type, FocusSnapshotCollector.currentLineContent()), commandId));
                 case "command.isFullScreen" -> ApplicationManager.getApplication().invokeLater(() ->
                         isFullScreen(target, commandId, bridge));
                 case "command.listProjects" -> bridge.send("command.result", result(true, type, identity().get("projects")), id);
