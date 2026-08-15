@@ -169,7 +169,7 @@ IDEA Swing 焦点变化、键盘输入或鼠标输入后发送。消息正文是
 }
 ```
 
-`objectInfo` 是精简对象信息；需要实时读取时可以使用 `command.getObjectInfo`。需要实时读取输入能力时可以使用 `command.getInputable`。
+`objectInfo` 是精简对象信息；需要实时读取时可以使用 `command.getObjectInfo`。需要实时读取输入能力时可以使用 `command.getInputable`，读取光标语法上下文时可以使用 `command.getContext`。
 
 ## 四、快照 `payload` 字段
 
@@ -410,7 +410,11 @@ IDEA Swing 焦点变化、键盘输入或鼠标输入后发送。消息正文是
 
 在插件 UI 线程实时读取当前对象信息，返回 `data` 为 `objectInfo`，包括文件、语法上下文、表达式、对象类型、成员、方法参数和方法返回类型；无法解析时返回已有的表达式和 `kind`，没有当前编辑器时返回 `null`。
 
-### 5.2c `command.getSelectedText`
+### 5.2c `command.getContext`
+
+在插件 UI 线程实时读取当前主光标所在的语法上下文。成功响应的 `data` 为 `singleQuote`、`doubleQuote`、`backtick`、`parentheses`、`braces` 或 `none`；没有当前编辑器时为 `null`。
+
+### 5.2d `command.getSelectedText`
 
 主动在插件 UI 线程读取当前编辑器的主光标选中文本，不依赖 Fast 端缓存的编辑器快照。成功响应的 `data` 是选中文本；没有选中内容时为空字符串；没有可用编辑器或关闭 `sendText` 时为 `null`（某些客户端可能省略 `data` 字段）。该只读命令不要求 `target.instanceId`，但 Fast 端快捷方法会自动补充当前实例和项目目标。
 
@@ -437,7 +441,7 @@ IDEA Swing 焦点变化、键盘输入或鼠标输入后发送。消息正文是
 
 ### 5.3 `command.listProjects`
 
-### 5.2d `command.isFullScreen`
+### 5.2e `command.isFullScreen`
 
 查询目标项目窗口当前是否全屏。该命令可以携带 `target.instanceId` 以及项目身份字段；成功响应的 `data.fullScreen` 为布尔值。
 
