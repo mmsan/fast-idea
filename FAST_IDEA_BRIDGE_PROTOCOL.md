@@ -441,7 +441,7 @@ IDEA Swing 焦点变化、键盘输入或鼠标输入后发送。消息正文是
 
 ### 5.3 `command.listProjects`
 
-### 5.2e `command.isFullScreen`
+### 5.3a `command.isFullScreen`
 
 查询目标项目窗口当前是否全屏。该命令可以携带 `target.instanceId` 以及项目身份字段；成功响应的 `data.fullScreen` 为布尔值。
 
