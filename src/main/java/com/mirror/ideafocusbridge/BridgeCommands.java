@@ -58,7 +58,7 @@ final class BridgeCommands {
         if (activeEditor instanceof Map<?, ?> editor) {
             payload.put("activeProject", editor.get("project"));
         }
-        payload.put("capabilities", List.of("state", "getInputable", "getObjectInfo", "getSelectedText", "navigate", "select", "find", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages"));
+        payload.put("capabilities", List.of("state", "getInputable", "getContext", "getObjectInfo", "getSelectedText", "navigate", "select", "find", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages"));
         return payload;
     }
 
@@ -140,6 +140,8 @@ final class BridgeCommands {
                         bridge.send("command.result", result(true, type, FocusSnapshotCollector.collect()), commandId));
                 case "command.getInputable" -> ApplicationManager.getApplication().invokeLater(() ->
                         bridge.send("command.result", result(true, type, FocusSnapshotCollector.currentInputable()), commandId));
+                case "command.getContext" -> ApplicationManager.getApplication().invokeLater(() ->
+                        bridge.send("command.result", result(true, type, FocusSnapshotCollector.currentContext()), commandId));
                 case "command.getObjectInfo" -> ApplicationManager.getApplication().invokeLater(() ->
                         bridge.send("command.result", result(true, type, FocusSnapshotCollector.currentObjectInfo()), commandId));
                 case "command.getSelectedText" -> ApplicationManager.getApplication().invokeLater(() ->

@@ -55,6 +55,13 @@ final class FocusSnapshotCollector {
         return Boolean.TRUE.equals(collectStatus().get("inputable"));
     }
 
+    static String currentContext() {
+        Object activeEditor = collect().get("activeEditor");
+        if (!(activeEditor instanceof Map<?, ?> editor)) return null;
+        Object context = editor.get("context");
+        return context == null ? null : String.valueOf(context);
+    }
+
     static Map<String, Object> currentObjectInfo() {
         Object value = collectStatus().get("objectInfo");
         return value instanceof Map<?, ?> map ? copyMap(map) : null;
