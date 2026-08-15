@@ -119,6 +119,11 @@ final class FocusSnapshotCollector {
     static String currentSelectedText() {
         if (!FocusBridgeSettings.getInstance().data().sendText) return null;
         Component focus = KeyboardFocusManager.getCurrentKeyboardFocusManager().getPermanentFocusOwner();
+        if (focus instanceof JPasswordField) return null;
+        if (focus instanceof JTextComponent textInput) {
+            String selected = textInput.getSelectedText();
+            return selected == null ? "" : selected;
+        }
         Editor focusedEditor = editorFrom(focus);
         Editor editor = focusedEditor != null ? focusedEditor : selectedEditor(focus);
         if (editor == null || editor.isDisposed()) return null;
