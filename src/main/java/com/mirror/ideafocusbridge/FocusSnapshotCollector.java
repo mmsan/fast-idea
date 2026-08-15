@@ -7,19 +7,31 @@ import com.intellij.openapi.editor.LogicalPosition;
 import com.intellij.openapi.editor.VisualPosition;
 import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.fileEditor.FileEditorManager;
+import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.util.TextRange;
 import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.openapi.wm.WindowManager;
+import com.intellij.openapi.wm.ex.IdeFrameEx;
+import com.intellij.psi.PsiDocumentManager;
+import com.intellij.psi.PsiElement;
+import com.intellij.psi.PsiFile;
+import com.intellij.psi.PsiReference;
 
 import javax.swing.*;
 import javax.swing.text.JTextComponent;
 import java.awt.*;
 import java.awt.geom.Rectangle2D;
+import java.lang.reflect.Array;
+import java.lang.reflect.Method;
 import java.util.*;
 import java.util.List;
 
 final class FocusSnapshotCollector {
+    private static String lastEditorKey;
+    private static long lastEditorOpenedAt;
+
     private FocusSnapshotCollector() {}
 
     static Map<String, Object> collect() {
@@ -30,7 +42,59 @@ final class FocusSnapshotCollector {
         Editor focusedEditor = editorFrom(focus);
         Editor editor = focusedEditor != null ? focusedEditor : selectedEditor(focus);
         root.put("activeEditor", describeEditor(editor, focusedEditor == editor));
+        root.put("editorOpenedAt", editorOpenedAt(editor));
+        root.put("fullScreen", isFullScreen(editor));
         return root;
+    }
+
+    private static long editorOpenedAt(Editor editor) {
+        if (editor == null || editor.isDisposed()) return 0;
+        VirtualFile file = FileDocumentManager.getInstance().getFile(editor.getDocument());
+        Project project = editor.getProject();
+        String projectPath = project == null ? "" : Objects.toString(project.getBasePath(), "");
+        String filePath = file == null ? "" : file.getUrl();
+        String key = projectPath + "\n" + filePath + "\n" + System.identityHashCode(editor);
+        if (!key.equals(lastEditorKey)) {
+            lastEditorKey = key;
+            lastEditorOpenedAt = System.currentTimeMillis();
+        }
+        return lastEditorOpenedAt;
+    }
+
+    private static boolean isFullScreen(Editor editor) {
+        if (editor != null && editor.getProject() != null) {
+            javax.swing.JFrame frame = WindowManager.getInstance().getFrame(editor.getProject());
+            if (frame instanceof IdeFrameEx ideFrame) return ideFrame.isInFullScreen();
+        }
+        Window active = KeyboardFocusManager.getCurrentKeyboardFocusManager().getActiveWindow();
+        if (active != null) {
+            for (Project project : ProjectManager.getInstance().getOpenProjects()) {
+                javax.swing.JFrame frame = WindowManager.getInstance().getFrame(project);
+                if (frame == active && frame instanceof IdeFrameEx ideFrame) return ideFrame.isInFullScreen();
+            }
+        }
+        return false;
+    }
+
+    static List<VirtualFile> selectedResourceFiles() {
+        Component focus = KeyboardFocusManager.getCurrentKeyboardFocusManager().getPermanentFocusOwner();
+        Component tree = treeFrom(focus);
+        if (tree == null) return List.of();
+        try {
+            VirtualFile[] files = CommonDataKeys.VIRTUAL_FILE_ARRAY.getData(
+                    DataManager.getInstance().getDataContext(tree));
+            if (files == null || files.length == 0) return List.of();
+            return Arrays.stream(files).filter(Objects::nonNull).toList();
+        } catch (RuntimeException ignored) {
+            return List.of();
+        }
+    }
+
+    private static Component treeFrom(Component component) {
+        for (Component current = component; current != null; current = current.getParent()) {
+            if (current instanceof JTree) return current;
+        }
+        return null;
     }
 
     private static Map<String, Object> describeFocus(Component component) {
@@ -144,7 +208,266 @@ final class FocusSnapshotCollector {
         }
         value.put("carets", carets);
         addTextContext(editor, caret.getOffset(), value);
+        addEditorContext(editor, caret.getOffset(), value);
         return value;
+    }
+
+    /**
+     * Keep semantic context alongside the existing editor snapshot. PSI is used
+     * when the installed language plugin exposes it; unsupported languages
+     * simply return the stable generic defaults instead of guessing a type.
+     */
+    private static void addEditorContext(Editor editor, int offset, Map<String, Object> value) {
+        value.put("context", "none");
+        Project project = editor.getProject();
+        if (project == null) return;
+
+        try {
+            PsiFile file = PsiDocumentManager.getInstance(project).getPsiFile(editor.getDocument());
+            if (file == null) return;
+            PsiElement element = psiElementAt(file, offset);
+            if (element == null) return;
+            value.put("context", syntaxContext(file, element, offset));
+            Map<String, Object> expression = expressionContext(file, element, offset, editor.getDocument().getCharsSequence());
+            if (!expression.isEmpty()) value.put("expressionContext", expression);
+        } catch (RuntimeException ignored) {
+            // A language plugin can be unloaded independently of this plugin.
+            // The normal editor snapshot must remain available in that case.
+        }
+    }
+
+    private static PsiElement psiElementAt(PsiFile file, int offset) {
+        int length = file.getTextLength();
+        int safe = Math.max(0, Math.min(offset, length));
+        PsiElement element = safe < length ? file.findElementAt(safe) : null;
+        if (element == null && safe > 0) element = file.findElementAt(safe - 1);
+        return element;
+    }
+
+    private static String syntaxContext(PsiFile file, PsiElement element, int offset) {
+        for (PsiElement current = element; current != null && current != file; current = current.getParent()) {
+            if (!containsCaret(current, offset)) continue;
+            if (isStringElement(current)) return quoteKind(current.getText());
+            if (isObjectLiteral(current)) return "braces";
+            if (isParentheses(current)) return "parentheses";
+        }
+        return "none";
+    }
+
+    private static boolean containsCaret(PsiElement element, int offset) {
+        TextRange range = element.getTextRange();
+        return range != null && range.getStartOffset() <= offset && offset <= range.getEndOffset();
+    }
+
+    private static boolean isStringElement(PsiElement element) {
+        String className = element.getClass().getSimpleName().toLowerCase(Locale.ROOT);
+        String typeName = element.getNode() == null ? "" : element.getNode().getElementType().toString().toLowerCase(Locale.ROOT);
+        String text = Objects.toString(element.getText(), "").trim();
+        boolean quoted = text.length() >= 2 && ((text.startsWith("'") && text.endsWith("'"))
+                || (text.startsWith("\"") && text.endsWith("\""))
+                || (text.startsWith("`") && text.endsWith("`")));
+        return quoted && (className.contains("string") || className.contains("literal")
+                || className.contains("template") || typeName.contains("string")
+                || typeName.contains("literal") || typeName.contains("template"));
+    }
+
+    private static String quoteKind(String text) {
+        String value = text == null ? "" : text.trim();
+        if (value.startsWith("'")) return "singleQuote";
+        if (value.startsWith("\"")) return "doubleQuote";
+        if (value.startsWith("`")) return "backtick";
+        return "none";
+    }
+
+    private static boolean isObjectLiteral(PsiElement element) {
+        String className = element.getClass().getSimpleName().toLowerCase(Locale.ROOT);
+        String typeName = element.getNode() == null ? "" : element.getNode().getElementType().toString().toLowerCase(Locale.ROOT);
+        return className.contains("objectliteral") || className.contains("objectliteralexpression")
+                || typeName.contains("object_literal") || typeName.contains("objectliteral");
+    }
+
+    private static boolean isParentheses(PsiElement element) {
+        String className = element.getClass().getSimpleName().toLowerCase(Locale.ROOT);
+        if (!(className.contains("parenthes") || className.contains("argument")
+                || className.contains("parameter") || className.contains("expressionlist"))) return false;
+        String text = Objects.toString(element.getText(), "").trim();
+        return text.startsWith("(") && text.endsWith(")");
+    }
+
+    private static Map<String, Object> expressionContext(PsiFile file, PsiElement element, int offset,
+                                                           CharSequence documentText) {
+        PsiElement resolvedElement = null;
+        Object resolved = null;
+        for (PsiElement current = element; current != null && current != file; current = current.getParent()) {
+            for (PsiReference reference : current.getReferences()) {
+                try {
+                    Object candidate = reference.resolve();
+                    if (candidate != null) {
+                        resolvedElement = current;
+                        resolved = candidate;
+                        break;
+                    }
+                } catch (RuntimeException ignored) { }
+            }
+            if (resolved != null) break;
+        }
+
+        String expression = extractReference(documentText, offset);
+        if ((expression == null || expression.isBlank()) && resolvedElement != null) {
+            expression = cleanExpression(resolvedElement.getText());
+        }
+        if (expression == null || expression.isBlank() || expression.length() > 512) return Map.of();
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("expression", expression);
+        if (resolved != null) {
+            result.put("kind", symbolKind(resolved));
+            String type = typeText(resolved);
+            if (type != null && !type.isBlank()) result.put("type", type);
+            List<Map<String, Object>> members = members(resolved);
+            if (!members.isEmpty()) result.put("members", members);
+        } else {
+            result.put("kind", "reference");
+        }
+        return result;
+    }
+
+    private static String cleanExpression(String text) {
+        if (text == null) return null;
+        String value = text.trim();
+        return value.contains("\n") || value.contains("\r") ? null : value;
+    }
+
+    /** Extracts a reference-shaped expression only as a fallback when no PSI reference resolves. */
+    private static String extractReference(CharSequence source, int offset) {
+        if (source == null || source.length() == 0) return null;
+        int cursor = Math.max(0, Math.min(offset, source.length()));
+        int end = cursor;
+        while (end < source.length() && isIdentifierPart(source.charAt(end))) end++;
+        int start = cursor;
+        while (start > 0 && isIdentifierPart(source.charAt(start - 1))) start--;
+
+        while (start > 0) {
+            int index = start - 1;
+            while (index >= 0 && Character.isWhitespace(source.charAt(index))) index--;
+            if (index < 0 || source.charAt(index) != '.') break;
+            index--;
+            while (index >= 0 && Character.isWhitespace(source.charAt(index))) index--;
+            if (index >= 0 && source.charAt(index) == ')') {
+                index = matchingOpen(source, index, '(', ')');
+                if (index < 0) break;
+                start = index;
+            } else {
+                while (index >= 0 && isIdentifierPart(source.charAt(index))) index--;
+                start = index + 1;
+            }
+        }
+        String value = source.subSequence(start, end).toString().trim();
+        return value.matches("[A-Za-z_$][A-Za-z0-9_$]*(?:\\s*\\.\\s*(?:[A-Za-z_$][A-Za-z0-9_$]*|\\([^\\n\\r]*\\)))*\\s*\\.?")
+                ? value.replaceAll("\\s+", "") : null;
+    }
+
+    private static int matchingOpen(CharSequence source, int close, char open, char closing) {
+        int depth = 0;
+        for (int index = close; index >= 0; index--) {
+            char c = source.charAt(index);
+            if (c == closing) depth++;
+            else if (c == open && --depth == 0) return index;
+        }
+        return -1;
+    }
+
+    private static boolean isIdentifierPart(char c) {
+        return Character.isLetterOrDigit(c) || c == '_' || c == '$';
+    }
+
+    private static String symbolKind(Object resolved) {
+        String name = resolved.getClass().getSimpleName().toLowerCase(Locale.ROOT);
+        if (name.contains("method") || name.contains("function")) return "method";
+        if (name.contains("field") || name.contains("property")) return "property";
+        if (name.contains("class") || name.contains("interface") || name.contains("type")) return "type";
+        if (name.contains("variable") || name.contains("parameter")) return "variable";
+        return "reference";
+    }
+
+    private static String typeText(Object resolved) {
+        Object type = invokeNoArg(resolved, "getType");
+        if (type == null) type = invokeNoArg(resolved, "getReturnType");
+        String text = canonicalType(type);
+        if (text != null) return text;
+        String qualified = stringValue(invokeNoArg(resolved, "getQualifiedName"));
+        return qualified == null ? stringValue(invokeNoArg(resolved, "getName")) : qualified;
+    }
+
+    private static String canonicalType(Object type) {
+        if (type == null) return null;
+        String text = stringValue(invokeNoArg(type, "getCanonicalText"));
+        if (text == null) text = stringValue(invokeNoArg(type, "getPresentableText"));
+        return text == null ? cleanExpression(type.toString()) : text;
+    }
+
+    private static List<Map<String, Object>> members(Object resolved) {
+        Object type = invokeNoArg(resolved, "getType");
+        Object owner = invokeNoArg(type, "resolve");
+        if (owner == null && resolved.getClass().getSimpleName().toLowerCase(Locale.ROOT).contains("class")) owner = resolved;
+        if (owner == null) return List.of();
+
+        List<Map<String, Object>> result = new ArrayList<>();
+        addMembers(result, invokeNoArg(owner, "getAllFields"), false);
+        addMembers(result, invokeNoArg(owner, "getAllMethods"), true);
+        return result.size() <= 15 ? result : new ArrayList<>(result.subList(0, 15));
+    }
+
+    private static void addMembers(List<Map<String, Object>> result, Object values, boolean method) {
+        if (values == null) return;
+        int length = values.getClass().isArray() ? Array.getLength(values) : 0;
+        for (int index = 0; index < length && result.size() < 15; index++) {
+            Object member = Array.get(values, index);
+            String name = stringValue(invokeNoArg(member, "getName"));
+            if (name == null || name.isBlank()) continue;
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("name", name);
+            item.put("kind", method ? "method" : "property");
+            String type = method ? canonicalType(invokeNoArg(member, "getReturnType"))
+                    : canonicalType(invokeNoArg(member, "getType"));
+            if (type != null && !type.isBlank()) item.put("type", type);
+            if (method) {
+                List<Map<String, Object>> parameters = methodParameters(member);
+                if (!parameters.isEmpty()) item.put("parameters", parameters);
+                if (type != null && !type.isBlank()) item.put("returnType", type);
+            }
+            result.add(item);
+        }
+    }
+
+    private static List<Map<String, Object>> methodParameters(Object method) {
+        Object list = invokeNoArg(method, "getParameterList");
+        Object parameters = invokeNoArg(list, "getParameters");
+        if (parameters == null || !parameters.getClass().isArray()) return List.of();
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (int index = 0; index < Array.getLength(parameters) && index < 15; index++) {
+            Object parameter = Array.get(parameters, index);
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("name", Objects.toString(stringValue(invokeNoArg(parameter, "getName")), "arg" + index));
+            String type = canonicalType(invokeNoArg(parameter, "getType"));
+            if (type != null) item.put("type", type);
+            result.add(item);
+        }
+        return result;
+    }
+
+    private static Object invokeNoArg(Object target, String name) {
+        if (target == null) return null;
+        try {
+            for (Method method : target.getClass().getMethods()) {
+                if (method.getName().equals(name) && method.getParameterCount() == 0) return method.invoke(target);
+            }
+        } catch (ReflectiveOperationException | RuntimeException ignored) { }
+        return null;
+    }
+
+    private static String stringValue(Object value) {
+        return value instanceof String text && !text.isBlank() ? text : null;
     }
 
     private static void addTextContext(Editor editor, int offset, Map<String, Object> value) {

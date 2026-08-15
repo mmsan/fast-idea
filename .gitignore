@@ -1,4 +1,6 @@
 .gradle/
+.intellijPlatform-build/
+.intellijPlatform-release/
 .intellijPlatform/
 .gradle-dist/
 gradle-*-bin.zip

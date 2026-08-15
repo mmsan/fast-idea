@@ -32,6 +32,20 @@ if ($hostsMatch.Success) {
     if ($customPropertiesText.Length -gt 0 -and -not $customPropertiesText.EndsWith("`n")) { $customPropertiesText += "`r`n" }
     $customPropertiesText += "idea.plugin.hosts=$RepositoryUrl`r`n"
 }
+$devModeMatch = [regex]::Match($customPropertiesText, '(?m)^fast\.idea\.bridge\.dev=.*$')
+if ($devModeMatch.Success) {
+    $customPropertiesText = $customPropertiesText.Remove($devModeMatch.Index, $devModeMatch.Length).Insert($devModeMatch.Index, 'fast.idea.bridge.dev=true')
+} else {
+    if ($customPropertiesText.Length -gt 0 -and -not $customPropertiesText.EndsWith("`n")) { $customPropertiesText += "`r`n" }
+    $customPropertiesText += "fast.idea.bridge.dev=true`r`n"
+}
+$autoRestartMatch = [regex]::Match($customPropertiesText, '(?m)^fast\.idea\.bridge\.autoRestart=.*$')
+if ($autoRestartMatch.Success) {
+    $customPropertiesText = $customPropertiesText.Remove($autoRestartMatch.Index, $autoRestartMatch.Length).Insert($autoRestartMatch.Index, 'fast.idea.bridge.autoRestart=true')
+} else {
+    if ($customPropertiesText.Length -gt 0 -and -not $customPropertiesText.EndsWith("`n")) { $customPropertiesText += "`r`n" }
+    $customPropertiesText += "fast.idea.bridge.autoRestart=true`r`n"
+}
 [IO.File]::WriteAllText($customProperties, $customPropertiesText, [Text.UTF8Encoding]::new($false))
 
 $repository = [xml](Invoke-WebRequest -Uri $RepositoryUrl -UseBasicParsing -TimeoutSec 10).Content

@@ -6,7 +6,6 @@ import com.google.gson.JsonParser;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.components.Service;
-import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.editor.EditorFactory;
 import com.intellij.openapi.editor.event.CaretEvent;
 import com.intellij.openapi.editor.event.CaretListener;
@@ -29,11 +28,11 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 @Service(Service.Level.APP)
 public final class FocusBridgeService implements Disposable {
-    private static final Logger LOG = Logger.getInstance(FocusBridgeService.class);
     private final Gson gson = new Gson();
     private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "fast-idea-bridge"); t.setDaemon(true); return t;
@@ -44,6 +43,8 @@ public final class FocusBridgeService implements Disposable {
     private final AtomicBoolean reconnectScheduled = new AtomicBoolean();
     private final AtomicLong generation = new AtomicLong();
     private final AtomicLong sequence = new AtomicLong();
+    private final AtomicInteger connectionFailures = new AtomicInteger();
+    private final LocalPluginUpdateChecker localPluginUpdateChecker = new LocalPluginUpdateChecker();
     private final String instanceId = UUID.randomUUID().toString();
     private volatile String connectionId = UUID.randomUUID().toString();
     private volatile WebSocket socket;
@@ -60,8 +61,13 @@ public final class FocusBridgeService implements Disposable {
     String instanceId() { return instanceId; }
     String connectionId() { return connectionId; }
 
+    void runBackground(Runnable task) {
+        if (task != null && !executor.isShutdown()) executor.execute(task);
+    }
+
     public void start() {
         if (!started.compareAndSet(false, true)) return;
+        BridgeLog.info("service started; autoConnect=" + FocusBridgeSettings.getInstance().data().autoConnect);
         focusListener = event -> scheduleSnapshot("focus.changed", 0);
         KeyboardFocusManager.getCurrentKeyboardFocusManager()
                 .addPropertyChangeListener("permanentFocusOwner", focusListener);
@@ -80,10 +86,12 @@ public final class FocusBridgeService implements Disposable {
             @Override public void documentChanged(DocumentEvent event) { scheduleSnapshot("editor.documentChanged", 100); }
         }, this);
         executor.scheduleWithFixedDelay(this::heartbeat, 2, 2, TimeUnit.SECONDS);
+        localPluginUpdateChecker.start();
         if (FocusBridgeSettings.getInstance().data().autoConnect) connect();
     }
 
     public void settingsChanged() {
+        BridgeLog.info("settings changed; reconnecting");
         long ignored = generation.incrementAndGet();
         reconnectScheduled.set(false);
         reconnectAttempt = 0;
@@ -96,15 +104,23 @@ public final class FocusBridgeService implements Disposable {
         long expectedGeneration = generation.get();
         URI uri;
         try { uri = URI.create(FocusBridgeSettings.getInstance().websocketUrl()); }
-        catch (RuntimeException e) { LOG.warn("Invalid Focus Bridge WebSocket URL", e); return; }
+        catch (RuntimeException e) { BridgeLog.warn("invalid WebSocket URL", e); return; }
 
         WebSocket.Builder builder = httpClient.newWebSocketBuilder().connectTimeout(Duration.ofSeconds(1));
         String token = FocusBridgeSettings.getInstance().data().token;
         if (token != null && !token.isBlank()) builder.header("Authorization", "Bearer " + token);
         builder.header("X-Idea-Bridge-Version", "1");
         builder.buildAsync(uri, new SocketListener(expectedGeneration)).whenComplete((ws, error) -> {
-            if (error != null && expectedGeneration == generation.get()) scheduleReconnect(expectedGeneration);
+            if (error != null && expectedGeneration == generation.get()) {
+                recordConnectionFailure("connection failed", error);
+                scheduleReconnect(expectedGeneration);
+            }
         });
+    }
+
+    private void recordConnectionFailure(String message, Throwable error) {
+        int count = connectionFailures.incrementAndGet();
+        if (count <= 3 || count % 10 == 0) BridgeLog.warn(message + "; attempt=" + count, error);
     }
 
     private void scheduleReconnect(long expectedGeneration) {
@@ -112,6 +128,9 @@ public final class FocusBridgeService implements Disposable {
         if (!reconnectScheduled.compareAndSet(false, true)) return;
         int[] delays = {200, 500, 1_000, 2_000};
         int delay = delays[Math.min(reconnectAttempt++, delays.length - 1)];
+        if (reconnectAttempt <= 3 || reconnectAttempt % 10 == 0) {
+            BridgeLog.info("reconnect scheduled; delayMs=" + delay);
+        }
         executor.schedule(() -> {
             reconnectScheduled.set(false);
             if (expectedGeneration == generation.get()) connect();
@@ -125,6 +144,7 @@ public final class FocusBridgeService implements Disposable {
         if (lastPongMillis > 0 && now - lastPongMillis > 6_000) {
             if (socket == ws) socket = null;
             ws.abort();
+            BridgeLog.warn("heartbeat timeout; reconnecting", null);
             scheduleReconnect(generation.get());
             return;
         }
@@ -132,6 +152,7 @@ public final class FocusBridgeService implements Disposable {
         ws.sendPing(ping).exceptionally(error -> {
             if (socket == ws) socket = null;
             ws.abort();
+            BridgeLog.warn("ping failed; reconnecting", error);
             scheduleReconnect(generation.get());
             return null;
         });
@@ -155,7 +176,10 @@ public final class FocusBridgeService implements Disposable {
         message.put("type", type); message.put("timestamp", System.currentTimeMillis());
         message.put("sequence", sequence.incrementAndGet()); message.put("payload", payload);
         message.put("source", BridgeCommands.source(instanceId, connectionId, payload));
-        ws.sendText(gson.toJson(message), true).exceptionally(error -> { LOG.debug(error); return null; });
+        ws.sendText(gson.toJson(message), true).exceptionally(error -> {
+            BridgeLog.warn("message send failed; type=" + type, error);
+            return null;
+        });
     }
 
     private final class SocketListener implements WebSocket.Listener {
@@ -167,6 +191,8 @@ public final class FocusBridgeService implements Disposable {
             if (expectedGeneration != generation.get()) { webSocket.abort(); return; }
             connectionId = UUID.randomUUID().toString();
             socket = webSocket; reconnectAttempt = 0; reconnectScheduled.set(false);
+            int failures = connectionFailures.getAndSet(0);
+            BridgeLog.info("connected" + (failures > 0 ? "; recoveredAfterFailures=" + failures : ""));
             lastPongMillis = System.currentTimeMillis();
             ApplicationManager.getApplication().invokeLater(() -> {
                 send("bridge.hello", BridgeCommands.identity(), null);
@@ -203,13 +229,14 @@ public final class FocusBridgeService implements Disposable {
 
         @Override public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
             if (socket == webSocket) socket = null;
+            BridgeLog.info("connection closed; code=" + statusCode + "; reason=" + reason);
             scheduleReconnect(expectedGeneration);
             return CompletableFuture.completedFuture(null);
         }
 
         @Override public void onError(WebSocket webSocket, Throwable error) {
             if (socket == webSocket) socket = null;
-            LOG.debug("Focus Bridge socket error", error);
+            recordConnectionFailure("socket error", error);
             scheduleReconnect(expectedGeneration);
         }
     }
@@ -221,6 +248,8 @@ public final class FocusBridgeService implements Disposable {
         if (inputListener != null) Toolkit.getDefaultToolkit().removeAWTEventListener(inputListener);
         WebSocket ws = socket; socket = null;
         if (ws != null) ws.sendClose(WebSocket.NORMAL_CLOSURE, "plugin disposed");
+        BridgeLog.info("service disposed");
+        localPluginUpdateChecker.dispose();
         executor.shutdownNow();
     }
 }

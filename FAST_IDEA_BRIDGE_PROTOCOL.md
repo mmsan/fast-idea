@@ -37,7 +37,6 @@
 
 ```json
 {
-  "installationId": "插件安装 ID",
   "instanceId": "IDEA 进程 ID",
   "connectionId": "本次 WebSocket 连接 ID",
   "projectId": "当前项目 ID",
@@ -49,7 +48,6 @@
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `installationId` | string | 插件安装级别的稳定 ID，保存于 IDEA 配置中。 |
 | `instanceId` | string | 当前 IDEA 进程的 ID。多个 IDEA 进程不会共用此值。 |
 | `connectionId` | string | 每次 WebSocket 重连都会变化。 |
 | `projectId` | string，可选 | 当前编辑器所属项目的 ID。 |
@@ -80,13 +78,8 @@ WebSocket 连接建立后发送一次，用于识别这是 Fast Idea Bridge 插�
   "type": "bridge.hello",
   "payload": {
     "client": "fast-idea-bridge",
-    "clientId": "安装 ID",
-    "installationId": "安装 ID",
     "instanceId": "IDEA 进程 ID",
     "connectionId": "连接 ID",
-    "ide": "IntelliJ IDEA",
-    "build": "2024.1.7",
-    "pluginVersion": "0.1.0",
     "projects": [],
     "processId": 12345,
     "nativeWindows": {},
@@ -96,6 +89,8 @@ WebSocket 连接建立后发送一次，用于识别这是 Fast Idea Bridge 插�
       "select",
       "find",
       "requestFocus",
+      "fullScreen",
+      "copyResourcePath",
       "listProjects"
     ]
   }
@@ -105,13 +100,8 @@ WebSocket 连接建立后发送一次，用于识别这是 Fast Idea Bridge 插�
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `client` | string | 固定为 `fast-idea-bridge`。Node.js 服务可以用它识别此插件。 |
-| `clientId` | string | 当前实现中等于 `installationId`。 |
-| `installationId` | string | 插件安装 ID。 |
 | `instanceId` | string | IDEA 进程 ID。 |
 | `connectionId` | string | 当前连接 ID。 |
-| `ide` | string | IDE 完整名称。 |
-| `build` | string | IDE 构建版本。 |
-| `pluginVersion` | string | 插件版本，当前为 `0.1.0`。 |
 | `projects` | array | 当前打开的项目列表。项目字段见 `source.projects`。 |
 | `processId` | number | IDEA 操作系统进程 ID。 |
 | `nativeWindows` | object | 当前进程的顶层原生窗口信息。 |
@@ -121,26 +111,14 @@ WebSocket 连接建立后发送一次，用于识别这是 Fast Idea Bridge 插�
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `supported` | boolean | 当前平台是否支持读取原生窗口句柄。 |
 | `activeWindowHandle` | string，可选 | 当前活动窗口句柄，使用无符号十进制字符串。 |
 | `windows` | array | 当前进程的顶层窗口列表。 |
-| `format` | string，可选 | 句柄格式说明。 |
 
 窗口对象字段：
 
 ```json
 {
-  "handle": "132844",
-  "handleHex": "0x206EC",
-  "active": true,
-  "className": "java.awt.Frame",
-  "title": "idea-input",
-  "bounds": {
-    "x": 0,
-    "y": 0,
-    "width": 1280,
-    "height": 800
-  }
+  "handle": "132844"
 }
 ```
 
@@ -175,6 +153,18 @@ IDEA Swing 焦点变化、键盘输入或鼠标输入后发送。消息正文是
 编辑器文档内容变化后发送。其 `payload` 与其他快照事件相同；如果设置中开启发送文本，还会包含文本上下文。
 
 ## 四、快照 `payload` 字段
+
+### 4.0 `payload.fullScreen`
+
+`payload.fullScreen` 是布尔值，表示当前 IDEA 项目窗口是否处于全屏状态。总服务收到状态事件后，如果该值不是 `true`，可以发送 `command.fullScreen`；插件端会幂等地设置为全屏，不会反复切换。
+
+### 4.0a `payload.editorOpenedAt`
+
+### 4.0b `command.isFullScreen` 返回值
+
+`command.isFullScreen` 会在目标项目窗口所在的 Swing UI 线程重新读取全屏状态，返回 `data.fullScreen`。状态暂不可用时返回错误，而不是把未知状态当作未全屏。
+
+`payload.editorOpenedAt` 是当前编辑器或活动文件首次成为当前编辑器的 Unix 毫秒时间戳。`bridge.hello.payload` 也包含这两个全屏判断字段以及 `activeProject`，总服务只在握手时执行一次自动全屏判断；打开时间超过 30 秒或缺少字段时跳过，避免 Socket 重连时覆盖用户手动调整的窗口大小。后续选中文件、光标和文档事件不会触发自动全屏。
 
 ### 4.1 `payload.focus`
 
@@ -333,6 +323,31 @@ IDEA Swing 焦点变化、键盘输入或鼠标输入后发送。消息正文是
 
 上下文长度由设置项 `contextCharacters` 控制，默认值为 `200`。
 
+### 4.4 `payload.activeEditor` 编辑上下文
+
+插件会在已有 `activeEditor` 快照中尽量附带通用的编辑上下文；底层使用当前编辑器可用的 PSI、符号或语言服务能力，无法可靠判断时省略具体字段，不猜测类型。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `context` | string | 光标最内层的主要语法上下文：`singleQuote`、`doubleQuote`、`backtick`、`braces`、`parentheses` 或 `none`。`braces` 只表示语义上的对象字面量大括号，不表示普通代码块。 |
+| `expressionContext` | object，可选 | 光标关联的表达式、符号类型、可推断的完整类型名和最多 15 个成员。 |
+
+`expressionContext` 的结构为：
+
+```json
+{
+  "expression": "response.data.user",
+  "kind": "property",
+  "type": "com.example.user.User",
+  "members": [
+    {"name": "name", "kind": "property", "type": "java.lang.String"},
+    {"name": "load", "kind": "method", "returnType": "java.lang.String"}
+  ]
+}
+```
+
+`type` 优先使用语言服务可唯一定位的完整类型名；无法可靠获得 package/namespace 时可以退化为简单类型名或省略。成员数组最多 15 项，方法可以附带 `parameters` 和 `returnType`。
+
 ## 五、Node.js 发给插件的命令
 
 插件也会接收 Node.js 发来的命令。命令同样是 JSON 文本，至少包含 `id` 和 `type`：
@@ -369,6 +384,19 @@ IDEA Swing 焦点变化、键盘输入或鼠标输入后发送。消息正文是
 ```
 
 ### 5.3 `command.listProjects`
+
+### 5.2a `command.isFullScreen`
+
+查询目标项目窗口当前是否全屏。该命令可以携带 `target.instanceId` 以及项目身份字段；成功响应的 `data.fullScreen` 为布尔值。
+
+```json
+{
+  "id": "fullscreen-state-1",
+  "type": "command.isFullScreen",
+  "target": {"instanceId": "bridge.hello 中的 instanceId"},
+  "payload": {}
+}
+```
 
 请求当前 IDEA 进程打开的项目列表：
 
@@ -485,6 +513,74 @@ On success, the response contains `startOffset`, `endOffset`, zero-based `line` 
   }
 }
 ```
+
+### 5.8 `command.copyResourcePath`
+
+当 IDEA 的 Project View（项目资源管理器）获得焦点，并且选中一个或多个文件/目录时，在 `data.paths` 返回全部绝对路径。单选时额外返回兼容字段 `data.path`。非 Project View 焦点或没有选中文件/目录时，命令成功返回 `data.handled: false`，调用方应继续执行自己的后续逻辑。
+
+```json
+{
+  "id": "7",
+  "type": "command.copyResourcePath",
+  "target": {
+    "instanceId": "bridge.hello 中的 instanceId"
+  },
+  "payload": {}
+}
+```
+
+成功处理时返回：
+
+```json
+{
+  "success": true,
+  "command": "command.copyResourcePath",
+  "data": {
+    "handled": true,
+    "paths": [
+      "D:/v/idea-input/src/main/java/example/App.java",
+      "D:/v/idea-input/src/main/java/example/Other.java"
+    ]
+  }
+}
+```
+
+### 5.9 `command.fullScreen`
+
+将目标 IDEA 项目窗口设置为全屏。该命令必须提供 `target.instanceId`，并可提供 `target.projectId` 或 `target.projectBasePath` 精确选择项目。成功响应的 `data.fullScreen` 为 `true`；如果当前已经全屏，插件不会再次切换窗口状态。
+
+```json
+{
+  "id": "5",
+  "type": "command.fullScreen",
+  "target": {"instanceId": "bridge.hello 中的 instanceId"},
+  "payload": {}
+}
+```
+
+### 5.10 `command.queryPythonPackages`
+
+按需查询目标项目实际 Python Interpreter/Environment 中给定的 import 或 package 名称。该命令不会枚举环境中的全部包；一次请求可以传入多个名称。字符串名称默认同时作为 import 名和 distribution 名，也可以使用对象显式提供 `distributionName`，以支持 `sklearn` → `scikit-learn`、`cv2` → `opencv-python` 等映射。
+
+```json
+{
+  "id": "python-1",
+  "type": "command.queryPythonPackages",
+  "target": {
+    "instanceId": "bridge.hello 中的 instanceId",
+    "projectId": "可选项目 ID"
+  },
+  "payload": {
+    "packages": [
+      "numpy",
+      {"importName": "sklearn", "distributionName": "scikit-learn"},
+      "torch"
+    ]
+  }
+}
+```
+
+成功响应的 `data` 包含 `interpreter`、`version`、`environmentType`（如 `venv`、`conda`、`system`）以及按请求名称返回的 `packages` 映射；未安装的包只返回 `installed: false`。
 
 ## 六、命令响应
 
@@ -753,3 +849,47 @@ const selectedText = f.ideaFocusBridge.getCurrentSelectedText()
 如果 IDEA 未开启文本发送，或当前没有可用编辑器，`getCurrentSelectedText()` 返回 `null`。
 
 上述四个快捷查询方法在当前窗口属于 IDEA/CLion、但没有连接 Fast Idea Bridge 时，会通过 `f.log(..., true)` 提示当前 IDE 窗口可能没有安装或启用 `Fast Idea Bridge` 插件；当前窗口不是 IDEA/CLion 时不会提示。提示采用 3 秒防抖。
+
+### 9.6 通用当前编辑器入口
+
+为了让 FastJS 不必根据进程名分别选择 IDEA、Visual Studio 或 VS Code 的 bridge，Fast 还提供统一入口 `f.editorBridge`。原有的 `f.ideaFocusBridge`、`f.visualStudioBridge` 和 `f.vscodeBridge` 保留，仍可用于明确指定某一个插件或项目。
+
+统一入口始终根据 `f.fast.currentWindow` 选择当前激活的编辑器窗口：
+
+```js
+const editor = f.editorBridge
+
+editor.getCurrentPlatform()       // 'idea'、'visualStudio'、'vscode' 或 null
+editor.getCurrentProjectName()
+editor.getCurrentProjectBasePath()
+editor.getCurrentFilePath()
+editor.getCurrentLine()
+editor.getCurrentSelectedText()
+editor.getCurrentEditor()
+editor.getCurrentInfo()           // 一次返回当前编辑器的常用信息
+```
+
+也可以直接对当前编辑器所属项目执行通用操作：
+
+```js
+editor.openFile('README.md', 10, 1)
+editor.find('FocusBridge')
+await editor.copySelectedResourcePath()
+```
+
+`openFile()` 和 `find()` 默认使用当前编辑器项目，也可以通过 `options.projectName` 覆盖项目名。`subscribe()` 会同时订阅三个插件的同名事件，并返回取消订阅函数：
+
+```js
+const off = editor.subscribe('focus.changed', (msg, ws, source) => {
+  console.log(editor.getCurrentInfo())
+})
+off()
+```
+
+需要调用当前插件尚未被统一包装的方法时，可以取得原始 bridge，或使用 `invokeCurrent()`：
+
+```js
+const bridge = editor.getCurrentBridge()
+bridge?.getInputStates?.()
+editor.invokeCurrent('getInputStates')
+```

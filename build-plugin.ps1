@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$Verify
+    [switch]$Verify,
+    [string]$ProjectCacheDirectory
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,14 +12,9 @@ $versionMatch = [regex]::Match($propertiesText, '(?m)^pluginVersion=(\d+\.\d+\.\
 if (-not $versionMatch.Success) { throw 'pluginVersion was not found in gradle.properties.' }
 $version = $versionMatch.Groups[1].Value
 
-$javaHomeForBuild = $env:JAVA_HOME
-if ([string]::IsNullOrWhiteSpace($javaHomeForBuild) -or -not (Test-Path -LiteralPath (Join-Path $javaHomeForBuild 'bin\java.exe'))) {
-    $javaExe = Get-ChildItem -LiteralPath 'C:\Program Files\JetBrains' -Recurse -File -Filter 'java.exe' -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -match '\\jbr\\bin\\java\.exe$' } |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -First 1
-    if ($null -eq $javaExe) { throw 'JAVA_HOME and JetBrains Runtime were not found.' }
-    $javaHomeForBuild = Split-Path (Split-Path $javaExe.FullName -Parent) -Parent
+$javaHomeForBuild = 'C:\Program Files\Eclipse Adoptium\jdk-17.0.20.8-hotspot'
+if (-not (Test-Path -LiteralPath (Join-Path $javaHomeForBuild 'bin\java.exe'))) {
+    throw "The required standalone JDK 17 was not found: $javaHomeForBuild"
 }
 
 $savedErrorPreference = $ErrorActionPreference
@@ -33,11 +29,18 @@ $localGradle = Join-Path $projectRoot '.gradle-dist\gradle-9.0.0\bin\gradle.bat'
 $gradleCommand = if (Test-Path -LiteralPath $localGradle) { $localGradle } else { Join-Path $projectRoot 'gradlew.bat' }
 $tasks = @('buildPlugin')
 if ($Verify) { $tasks += @('verifyPluginProjectConfiguration', 'verifyPluginStructure') }
+$projectCacheDirectoryForBuild = if ([string]::IsNullOrWhiteSpace($ProjectCacheDirectory)) {
+    Join-Path $projectRoot '.intellijPlatform-build\gradle-cache'
+} else {
+    [IO.Path]::GetFullPath($ProjectCacheDirectory)
+}
+New-Item -ItemType Directory -Path $projectCacheDirectoryForBuild -Force | Out-Null
+$gradleArguments = @($tasks + @('--project-cache-dir', $projectCacheDirectoryForBuild))
 
 $previousJavaHome = $env:JAVA_HOME
 try {
     $env:JAVA_HOME = $javaHomeForBuild
-    & $gradleCommand @tasks "-PjavaToolchainVersion=$javaMajor"
+    & $gradleCommand @gradleArguments "-PjavaToolchainVersion=$javaMajor"
     if ($LASTEXITCODE -ne 0) { throw "Gradle build failed with exit code $LASTEXITCODE." }
 } finally {
     $env:JAVA_HOME = $previousJavaHome

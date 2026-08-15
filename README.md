@@ -10,6 +10,10 @@ IntelliJ Platform plugin that connects IDE focus/editor state with the Fast appl
 - The plugin uses only the common Platform module, so it can run in IDEA and other JetBrains IDEs.
 - Local connection health: sends a WebSocket Ping every 2 seconds, treats 6 seconds without a Pong as disconnected, uses a 1-second handshake timeout, and reconnects with 200/500/1000/2000-ms backoff (then every 2 seconds).
 
+## 日志
+
+插件使用 IntelliJ 的 `Logger` 写入宿主 `idea.log`；发生连接失败、心跳超时或发送失败时会记录简短告警。也会在 IDEA 的标准日志目录下写入 `fast-idea-bridge/fast-idea-bridge-YYYY-MM-DD.log`，仅保留最近 3 天的日志。可通过 **Help | Show Log in Explorer** 打开日志目录。
+
 ## Instance and project identity
 
 Every outgoing message contains a top-level `source` object:
@@ -17,7 +21,6 @@ Every outgoing message contains a top-level `source` object:
 ```json
 {
   "source": {
-    "installationId": "stable-for-this-plugin-installation",
     "instanceId": "unique-for-this-IDE-process",
     "connectionId": "changes-after-each-reconnect",
     "projectId": "derived-from-the-normalized-project-root",
@@ -36,14 +39,10 @@ On Windows, the initial `bridge.hello` additionally contains the process ID and 
 {
   "processId": 12345,
   "nativeWindows": {
-    "supported": true,
     "activeWindowHandle": "132844",
     "windows": [
       {
-        "handle": "132844",
-        "handleHex": "0x206EC",
-        "active": true,
-        "title": "idea-input – IntelliJ IDEA"
+        "handle": "132844"
       }
     ]
   }
@@ -63,18 +62,26 @@ Commands may target one exact IDE and project:
 }
 ```
 
-Navigation, selection, and focus commands require `target.instanceId`. Commands addressed to another process are silently ignored, which makes broadcasting safe. A supplied `projectId` or `projectBasePath` must match the project containing the file.
+Navigation, selection, focus, and full-screen commands require `target.instanceId`. Commands addressed to another process are silently ignored, which makes broadcasting safe. A supplied `projectId` or `projectBasePath` must match the target project.
 
 ## Events
 
 The plugin sends `bridge.hello`, `focus.changed`, `editor.state`, `editor.caretChanged`, and `editor.documentChanged`. Every message has `version`, `id`, `type`, `timestamp`, `sequence`, and `payload`.
 
-`payload.focus` describes the actual Swing focus owner. `payload.activeEditor` independently describes the selected code editor, file, caret, selections, and optional text context.
+`payload.focus` describes the actual Swing focus owner. `payload.activeEditor` independently describes the selected code editor, file, caret, selections, and optional text context. It also includes the generic `context` and optional `expressionContext` (expression, kind, type, and at most 15 members). `payload.fullScreen` is the current IDE full-screen state. `payload.editorOpenedAt` is the Unix millisecond timestamp when the current editor became active. The handshake payload also includes these full-screen decision fields; the Fast service only evaluates automatic full-screen on `bridge.hello`.
 
 ## Commands
 
+全屏状态可以通过 `command.isFullScreen` 查询，返回 `data.fullScreen`。自动全屏会在握手后查询，确认未全屏才发送 `command.fullScreen`，切换后再次查询确认，并在窗口尚未就绪时重试。
+
 ```json
 {"id":"1","type":"command.getState","payload":{}}
+```
+
+To make the target IDE window full screen, send an idempotent command:
+
+```json
+{"id":"fullscreen-1","type":"command.fullScreen","target":{"instanceId":"INSTANCE_FROM_BRIDGE_HELLO"},"payload":{}}
 ```
 
 ```json
@@ -124,6 +131,12 @@ The plugin sends `bridge.hello`, `focus.changed`, `editor.state`, `editor.caretC
 `command.find` searches from the beginning of the file by default, opens the file if needed, and moves the caret to the first match. If `path` is omitted, it searches the selected editor for the targeted project. Set `caseSensitive` to `true` for case-sensitive matching, or `regex` to `true` for regular-expression matching. `select` selects the match instead of only moving the caret. `startOffset` can optionally specify the zero-based search start offset.
 
 For safety, commands can only open files contained by an open project. Password fields are always redacted.
+
+`command.queryPythonPackages` is an on-demand batch query. Its `payload.packages` list accepts import names or `{ "importName", "distributionName" }` objects and returns only the requested packages from the targeted project's configured interpreter, including `interpreter`, `version`, and `environmentType` when available.
+
+当 IDEA 的 Project View 获得焦点且选中一个或多个文件/目录时，`command.copyResourcePath` 在 `data.paths` 返回全部绝对路径并设置 `data.handled: true`；单选时还保留兼容字段 `data.path`。其他焦点状态或没有选中资源时返回 `data.handled: false`。
+
+本地开发模式通过 `idea.properties` 中的 `fast.idea.bridge.dev=true` 显式开启；`install-local-plugin.cmd` 会自动写入。仅在开发模式下，插件会在启动 10 秒后检查本机自定义插件仓库，之后每 10 秒检查一次。只要本机版本仍低于仓库版本，就会每 10 秒允许重新触发下载，以便从临时失败中恢复。发现新版后使用 IntelliJ 接口下载、校验并登记安装；当 `fast.idea.bridge.autoRestart=true` 时，弹窗询问是否立即重启，只有用户确认后才保存状态、重启 IDEA、应用新版并恢复窗口。两个开关默认均为 `false`，从官方仓库安装时不会启用本地轮询或重启提示。
 
 ## Build
 

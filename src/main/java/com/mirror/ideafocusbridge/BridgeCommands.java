@@ -2,7 +2,6 @@ package com.mirror.ideafocusbridge;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import com.intellij.openapi.application.ApplicationInfo;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.editor.LogicalPosition;
@@ -12,26 +11,29 @@ import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.fileEditor.OpenFileDescriptor;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
+import com.intellij.openapi.roots.ProjectRootManager;
+import com.intellij.openapi.projectRoots.Sdk;
 import com.intellij.openapi.vfs.LocalFileSystem;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.IdeFocusManager;
 import com.intellij.openapi.wm.WindowManager;
+import com.intellij.openapi.wm.ex.IdeFrameEx;
 import com.sun.jna.Native;
 import com.sun.jna.Pointer;
 
 import javax.swing.SwingUtilities;
-import java.awt.Dialog;
 import java.awt.Frame;
 import java.awt.KeyboardFocusManager;
-import java.awt.Rectangle;
 import java.awt.Window;
+import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.regex.Matcher;
 import java.util.regex.PatternSyntaxException;
+import java.util.concurrent.TimeUnit;
 
 final class BridgeCommands {
     private BridgeCommands() {}
@@ -44,23 +46,25 @@ final class BridgeCommands {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("client", "fast-idea-bridge");
         FocusBridgeService service = FocusBridgeService.getInstance();
-        payload.put("clientId", FocusBridgeSettings.getInstance().data().installationId);
-        payload.put("installationId", FocusBridgeSettings.getInstance().data().installationId);
         payload.put("instanceId", service.instanceId());
         payload.put("connectionId", service.connectionId());
-        payload.put("ide", ApplicationInfo.getInstance().getFullApplicationName());
-        payload.put("build", ApplicationInfo.getInstance().getBuild().asString());
-        payload.put("pluginVersion", "0.1.0"); payload.put("projects", projects);
+        payload.put("projects", projects);
         payload.put("processId", ProcessHandle.current().pid());
         payload.put("nativeWindows", nativeWindows());
-        payload.put("capabilities", List.of("state", "navigate", "select", "find", "requestFocus", "listProjects"));
+        Map<String, Object> snapshot = FocusSnapshotCollector.collect();
+        payload.put("fullScreen", snapshot.get("fullScreen"));
+        payload.put("editorOpenedAt", snapshot.get("editorOpenedAt"));
+        Object activeEditor = snapshot.get("activeEditor");
+        if (activeEditor instanceof Map<?, ?> editor) {
+            payload.put("activeProject", editor.get("project"));
+        }
+        payload.put("capabilities", List.of("state", "navigate", "select", "find", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages"));
         return payload;
     }
 
     private static Map<String, Object> nativeWindows() {
         Map<String, Object> result = new LinkedHashMap<>();
         if (!System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("windows")) {
-            result.put("supported", false);
             return result;
         }
         Window active = KeyboardFocusManager.getCurrentKeyboardFocusManager().getActiveWindow();
@@ -75,28 +79,17 @@ final class BridgeCommands {
                 String decimal = Long.toUnsignedString(handle);
                 Map<String, Object> item = new LinkedHashMap<>();
                 item.put("handle", decimal);
-                item.put("handleHex", "0x" + Long.toUnsignedString(handle, 16).toUpperCase(Locale.ROOT));
-                item.put("active", window == active);
-                item.put("className", window.getClass().getName());
-                item.put("title", window instanceof Frame frame ? frame.getTitle()
-                        : window instanceof Dialog dialog ? dialog.getTitle() : null);
-                Rectangle bounds = window.getBounds();
-                item.put("bounds", Map.of("x", bounds.x, "y", bounds.y,
-                        "width", bounds.width, "height", bounds.height));
                 windows.add(item);
                 if (window == active) activeHandle = decimal;
             } catch (RuntimeException ignored) { }
         }
-        result.put("supported", true);
         result.put("activeWindowHandle", activeHandle);
         result.put("windows", windows);
-        result.put("format", "unsigned decimal string; handleHex is provided for diagnostics");
         return result;
     }
 
     static Map<String, Object> source(String instanceId, String connectionId, Object payload) {
         Map<String, Object> source = new LinkedHashMap<>();
-        source.put("installationId", FocusBridgeSettings.getInstance().data().installationId);
         source.put("instanceId", instanceId);
         source.put("connectionId", connectionId);
         source.put("projects", openProjectIdentities());
@@ -145,12 +138,18 @@ final class BridgeCommands {
                 case "command.ping" -> bridge.send("command.result", Map.of("success", true, "command", type), id);
                 case "command.getState" -> ApplicationManager.getApplication().invokeLater(() ->
                         bridge.send("command.result", result(true, type, FocusSnapshotCollector.collect()), commandId));
+                case "command.isFullScreen" -> ApplicationManager.getApplication().invokeLater(() ->
+                        isFullScreen(target, commandId, bridge));
                 case "command.listProjects" -> bridge.send("command.result", result(true, type, identity().get("projects")), id);
                 case "command.navigate", "command.select" ->
                         ApplicationManager.getApplication().invokeLater(() -> navigate(type, payload, target, commandId, bridge));
                 case "command.find" ->
                         ApplicationManager.getApplication().invokeLater(() -> find(payload, target, commandId, bridge));
                 case "command.requestFocus" -> ApplicationManager.getApplication().invokeLater(() -> requestFocus(commandId, bridge));
+                case "command.fullScreen" -> ApplicationManager.getApplication().invokeLater(() -> fullScreen(target, commandId, bridge));
+                case "command.copyResourcePath" -> ApplicationManager.getApplication().invokeLater(() -> copyResourcePath(commandId, bridge));
+                case "command.queryPythonPackages" -> ApplicationManager.getApplication().invokeLater(() ->
+                        queryPythonPackages(payload, target, commandId, bridge));
                 default -> bridge.send("command.result", error(type, "UNKNOWN_COMMAND", "Unsupported command: " + type), id);
             }
         } catch (RuntimeException e) {
@@ -161,7 +160,10 @@ final class BridgeCommands {
     private static boolean validateInstanceTarget(String type, JsonObject target, FocusBridgeService bridge) {
         String targetInstance = string(target, "instanceId", null);
         boolean mutating = type.equals("command.navigate") || type.equals("command.select")
-                || type.equals("command.find") || type.equals("command.requestFocus");
+                || type.equals("command.find") || type.equals("command.requestFocus")
+                || type.equals("command.fullScreen")
+                || type.equals("command.copyResourcePath")
+                || type.equals("command.queryPythonPackages");
         if (mutating && (targetInstance == null || targetInstance.isBlank())) {
             throw new IllegalArgumentException("target.instanceId is required for this command");
         }
@@ -178,6 +180,201 @@ final class BridgeCommands {
             }
         }
         bridge.send("command.result", error("command.requestFocus", "NO_EDITOR", "No active text editor"), id);
+    }
+
+    private static void copyResourcePath(String id, FocusBridgeService bridge) {
+        List<VirtualFile> files = FocusSnapshotCollector.selectedResourceFiles();
+        if (files.isEmpty()) {
+            bridge.send("command.result", result(true, "command.copyResourcePath", Map.of("handled", false)), id);
+            return;
+        }
+        List<String> paths = files.stream().map(VirtualFile::getPath).toList();
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("handled", true);
+        data.put("paths", paths);
+        if (paths.size() == 1) data.put("path", paths.get(0));
+        bridge.send("command.result", result(true, "command.copyResourcePath", data), id);
+    }
+
+    private static void fullScreen(JsonObject targetIdentity, String id, FocusBridgeService bridge) {
+        Project project = resolveProject(targetIdentity);
+        if (project == null) {
+            bridge.send("command.result", error("command.fullScreen", "NO_PROJECT", "No open project window"), id);
+            return;
+        }
+
+        javax.swing.JFrame frame = WindowManager.getInstance().getFrame(project);
+        if (!(frame instanceof IdeFrameEx ideFrame)) {
+            bridge.send("command.result", error("command.fullScreen", "UNSUPPORTED", "Full screen is unavailable"), id);
+            return;
+        }
+        if (!ideFrame.isInFullScreen()) ideFrame.toggleFullScreen(true);
+        bridge.send("command.result", result(true, "command.fullScreen",
+                Map.of("fullScreen", ideFrame.isInFullScreen(), "project", project.getName())), id);
+    }
+
+    private static void isFullScreen(JsonObject targetIdentity, String id, FocusBridgeService bridge) {
+        Project project = resolveProject(targetIdentity);
+        if (project == null) {
+            bridge.send("command.result", error("command.isFullScreen", "NO_PROJECT", "No open project window"), id);
+            return;
+        }
+
+        javax.swing.JFrame frame = WindowManager.getInstance().getFrame(project);
+        if (!(frame instanceof IdeFrameEx ideFrame)) {
+            bridge.send("command.result", error("command.isFullScreen", "UNSUPPORTED", "Full screen is unavailable"), id);
+            return;
+        }
+        bridge.send("command.result", result(true, "command.isFullScreen",
+                Map.of("fullScreen", ideFrame.isInFullScreen(), "project", project.getName())), id);
+    }
+
+    private static Project resolveProject(JsonObject target) {
+        String requestedProjectId = string(target, "projectId", null);
+        String requestedBasePath = string(target, "projectBasePath", null);
+        for (Project project : ProjectManager.getInstance().getOpenProjects()) {
+            String basePath = Objects.toString(project.getBasePath(), "");
+            if (requestedProjectId != null && !requestedProjectId.equals(projectId(basePath))) continue;
+            if (requestedBasePath != null && !pathOf(requestedBasePath).normalize().equals(pathOf(basePath).normalize())) continue;
+            return project;
+        }
+        if (requestedProjectId != null || requestedBasePath != null) return null;
+        for (Project project : ProjectManager.getInstance().getOpenProjects()) {
+            if (FileEditorManager.getInstance(project).getSelectedTextEditor() != null) return project;
+        }
+        Project[] projects = ProjectManager.getInstance().getOpenProjects();
+        return projects.length == 0 ? null : projects[0];
+    }
+
+    private static final Pattern PYTHON_PACKAGE_NAME = Pattern.compile("[A-Za-z_][A-Za-z0-9_.-]*");
+    private static final String PYTHON_PACKAGE_QUERY = """
+            import importlib.util
+            import importlib.metadata
+            import json
+            import os
+            import sys
+            items = {}
+            for item in sys.argv[1:]:
+                import_name, distribution_name = item.split('\\t', 1)
+                installed = False
+                version = None
+                try:
+                    installed = importlib.util.find_spec(import_name) is not None
+                except (ImportError, ModuleNotFoundError, ValueError):
+                    installed = False
+                try:
+                    version = importlib.metadata.version(distribution_name)
+                    installed = True
+                except importlib.metadata.PackageNotFoundError:
+                    pass
+                value = {'installed': installed}
+                if version:
+                    value['version'] = version
+                items[import_name] = value
+            if os.environ.get('CONDA_PREFIX'):
+                environment_type = 'conda'
+            elif sys.prefix != getattr(sys, 'base_prefix', sys.prefix):
+                environment_type = 'venv'
+            else:
+                environment_type = 'system'
+            print(json.dumps({'interpreter': sys.executable,
+                              'version': platform_version(),
+                              'environmentType': environment_type,
+                              'packages': items}))
+            """.replace("platform_version()", "'.'.join(str(part) for part in sys.version_info[:3])");
+
+    private static void queryPythonPackages(JsonObject payload, JsonObject target, String id, FocusBridgeService bridge) {
+        List<String> packages = new ArrayList<>();
+        List<String> distributions = new ArrayList<>();
+        if (payload.has("packages") && payload.get("packages").isJsonArray()) {
+            payload.getAsJsonArray("packages").forEach(item -> {
+                String importName = null;
+                String distributionName = null;
+                if (item.isJsonPrimitive() && item.getAsJsonPrimitive().isString()) {
+                    importName = item.getAsString();
+                    distributionName = importName;
+                } else if (item.isJsonObject()) {
+                    JsonObject object = item.getAsJsonObject();
+                    importName = string(object, "importName", null);
+                    distributionName = string(object, "distributionName", importName);
+                }
+                if (importName == null || !PYTHON_PACKAGE_NAME.matcher(importName).matches()
+                        || distributionName == null || !PYTHON_PACKAGE_NAME.matcher(distributionName).matches()
+                        || packages.contains(importName)) return;
+                packages.add(importName);
+                distributions.add(distributionName);
+            });
+        }
+        if (packages.isEmpty()) {
+            bridge.send("command.result", error("command.queryPythonPackages", "INVALID_QUERY",
+                    "payload.packages must contain at least one package name"), id);
+            return;
+        }
+
+        Project project = resolveProject(target);
+        if (project == null) {
+            bridge.send("command.result", error("command.queryPythonPackages", "NO_PROJECT", "No open project matches the target"), id);
+            return;
+        }
+        Sdk sdk = ProjectRootManager.getInstance(project).getProjectSdk();
+        String interpreter = pythonInterpreter(sdk);
+        if (interpreter == null) {
+            bridge.send("command.result", error("command.queryPythonPackages", "PYTHON_INTERPRETER_NOT_FOUND",
+                    "The targeted project has no configured Python interpreter"), id);
+            return;
+        }
+
+        List<String> arguments = new ArrayList<>();
+        for (int index = 0; index < packages.size(); index++) arguments.add(packages.get(index) + "\t" + distributions.get(index));
+        bridge.runBackground(() -> {
+            try {
+                Map<String, Object> result = runPythonQuery(interpreter, arguments);
+                bridge.send("command.result", result(true, "command.queryPythonPackages", result), id);
+            } catch (RuntimeException e) {
+                bridge.send("command.result", error("command.queryPythonPackages", "PYTHON_QUERY_FAILED", e.getMessage()), id);
+            }
+        });
+    }
+
+    private static String pythonInterpreter(Sdk sdk) {
+        if (sdk == null || sdk.getHomePath() == null || sdk.getHomePath().isBlank()) return null;
+        String type = sdk.getSdkType() == null ? "" : Objects.toString(sdk.getSdkType().getName(), "");
+        String home = sdk.getHomePath();
+        Path homePath = Path.of(home);
+        boolean looksPython = type.toLowerCase(Locale.ROOT).contains("python")
+                || homePath.getFileName().toString().toLowerCase(Locale.ROOT).startsWith("python");
+        if (!looksPython) return null;
+        if (!java.nio.file.Files.isDirectory(homePath)) return homePath.toString();
+        String executable = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("windows")
+                ? "Scripts\\python.exe" : "bin/python";
+        Path candidate = homePath.resolve(executable);
+        return java.nio.file.Files.isRegularFile(candidate) ? candidate.toString() : null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> runPythonQuery(String interpreter, List<String> arguments) {
+        List<String> command = new ArrayList<>();
+        command.add(interpreter);
+        command.add("-c");
+        command.add(PYTHON_PACKAGE_QUERY);
+        command.addAll(arguments);
+        try {
+            Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
+            if (!process.waitFor(5, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                throw new IllegalStateException("Python package query timed out");
+            }
+            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+            if (process.exitValue() != 0 || output.isBlank()) throw new IllegalStateException("Python interpreter returned no package result");
+            Object value = new com.google.gson.Gson().fromJson(output, Object.class);
+            if (!(value instanceof Map<?, ?> map)) throw new IllegalStateException("Python interpreter returned invalid JSON");
+            return (Map<String, Object>) map;
+        } catch (IOException e) {
+            throw new IllegalStateException("Unable to start the configured Python interpreter", e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Python package query was interrupted", e);
+        }
     }
 
     private static void navigate(String type, JsonObject payload, JsonObject targetIdentity, String id, FocusBridgeService bridge) {
