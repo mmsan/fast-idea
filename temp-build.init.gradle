@@ -1,0 +1,5 @@
+gradle.beforeProject { project ->
+    project.layout.buildDirectory.set(
+        project.rootProject.layout.projectDirectory.dir('.intellijPlatform-build/isolated-build')
+    )
+}
