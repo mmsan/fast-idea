@@ -2,4 +2,12 @@ gradle.beforeProject { project ->
     project.layout.buildDirectory.set(
         project.rootProject.layout.projectDirectory.dir('.intellijPlatform-build/isolated-build')
     )
+    project.afterEvaluate {
+        def extension = project.extensions.findByName('intellijPlatform')
+        if (extension != null) {
+            extension.sandboxContainer.set(
+                project.rootProject.layout.projectDirectory.dir('.intellijPlatform-build/isolated-sandbox')
+            )
+        }
+    }
 }
