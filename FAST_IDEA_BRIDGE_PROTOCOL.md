@@ -920,6 +920,7 @@ editor.getCurrentProjectName()
 editor.getCurrentProjectBasePath()
 editor.getCurrentFilePath()
 await editor.isLive()
+editor.isEditorFocused()
 editor.getCurrentLine()
 await editor.getCurrentSelectedText()
 editor.getCurrentEditor()
@@ -937,6 +938,8 @@ await editor.copySelectedResourcePath()
 `openFile()` 和 `find()` 默认使用当前编辑器项目，也可以通过 `options.projectName` 覆盖项目名。`subscribe()` 会同时订阅三个插件的同名事件，并返回取消订阅函数：
 
 `isLive()` 返回 `Promise<boolean>`，通过现有的 `command.ping` 验证当前原生 bridge 是否仍能响应。首次检测最多等待 4 秒，成功状态缓存 5 秒，重复调用会复用该状态；首次检测失败后，每个原生 bridge 最多保留一个每秒重试任务，任务在检测成功或 60 秒后自动结束。WebSocket 关闭时缓存状态立即失效。
+
+`isEditorFocused()` 返回 `boolean`，读取 bridge 最近一次状态中的焦点信息。只有焦点类型为编辑器且编辑器声明拥有焦点时才返回 `true`；资源管理器和搜索框等其他控件返回 `false`。
 
 ```js
 const off = editor.subscribe('focus.changed', (msg, ws, source) => {
