@@ -58,7 +58,7 @@ final class BridgeCommands {
         if (activeEditor instanceof Map<?, ?> editor) {
             payload.put("activeProject", editor.get("project"));
         }
-        payload.put("capabilities", List.of("state", "navigate", "select", "find", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages"));
+        payload.put("capabilities", List.of("state", "getInputable", "getObjectInfo", "getSelectedText", "navigate", "select", "find", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages"));
         return payload;
     }
 
@@ -138,6 +138,12 @@ final class BridgeCommands {
                 case "command.ping" -> bridge.send("command.result", Map.of("success", true, "command", type), id);
                 case "command.getState" -> ApplicationManager.getApplication().invokeLater(() ->
                         bridge.send("command.result", result(true, type, FocusSnapshotCollector.collect()), commandId));
+                case "command.getInputable" -> ApplicationManager.getApplication().invokeLater(() ->
+                        bridge.send("command.result", result(true, type, FocusSnapshotCollector.currentInputable()), commandId));
+                case "command.getObjectInfo" -> ApplicationManager.getApplication().invokeLater(() ->
+                        bridge.send("command.result", result(true, type, FocusSnapshotCollector.currentObjectInfo()), commandId));
+                case "command.getSelectedText" -> ApplicationManager.getApplication().invokeLater(() ->
+                        bridge.send("command.result", result(true, type, FocusSnapshotCollector.currentSelectedText()), commandId));
                 case "command.isFullScreen" -> ApplicationManager.getApplication().invokeLater(() ->
                         isFullScreen(target, commandId, bridge));
                 case "command.listProjects" -> bridge.send("command.result", result(true, type, identity().get("projects")), id);

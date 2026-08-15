@@ -47,6 +47,79 @@ final class FocusSnapshotCollector {
         return root;
     }
 
+    static Map<String, Object> collectStatus() {
+        return status(collect());
+    }
+
+    static boolean currentInputable() {
+        return Boolean.TRUE.equals(collectStatus().get("inputable"));
+    }
+
+    static Map<String, Object> currentObjectInfo() {
+        Object value = collectStatus().get("objectInfo");
+        return value instanceof Map<?, ?> map ? copyMap(map) : null;
+    }
+
+    private static Map<String, Object> status(Map<String, Object> snapshot) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        Object focus = snapshot.get("focus");
+        Object activeEditor = snapshot.get("activeEditor");
+        result.put("inputable", isInputable(focus, activeEditor));
+        result.put("focus", focus);
+        result.put("activeEditor", activeEditor);
+        result.put("objectInfo", objectInfo(activeEditor));
+        return result;
+    }
+
+    private static boolean isInputable(Object focusValue, Object activeEditorValue) {
+        if (!(focusValue instanceof Map<?, ?> focus) || !isAvailable(focus)) return false;
+        String type = Objects.toString(focus.get("type"), "");
+        if ("textInput".equals(type)) {
+            Object inputValue = focus.get("input");
+            return inputValue instanceof Map<?, ?> input && Boolean.TRUE.equals(input.get("editable"));
+        }
+        if (!"editor".equals(type) || !(activeEditorValue instanceof Map<?, ?> editor)) return false;
+        Object editable = editor.get("editable");
+        Object fileValue = editor.get("file");
+        boolean writable = !(fileValue instanceof Map<?, ?> file) || !Boolean.FALSE.equals(file.get("writable"));
+        return Boolean.TRUE.equals(editor.get("ownsFocus")) &&
+                (Boolean.TRUE.equals(editable) || editable == null && writable);
+    }
+
+    private static boolean isAvailable(Map<?, ?> focus) {
+        return !Boolean.FALSE.equals(focus.get("enabled")) &&
+                !Boolean.FALSE.equals(focus.get("visible")) &&
+                !Boolean.FALSE.equals(focus.get("showing"));
+    }
+
+    private static Map<String, Object> objectInfo(Object activeEditorValue) {
+        if (!(activeEditorValue instanceof Map<?, ?> editor)) return null;
+        Map<String, Object> result = new LinkedHashMap<>();
+        for (String key : List.of("project", "file", "context", "expressionContext")) {
+            if (editor.containsKey(key)) result.put(key, editor.get(key));
+        }
+        return result;
+    }
+
+    private static Map<String, Object> copyMap(Map<?, ?> value) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : value.entrySet()) {
+            if (entry.getKey() != null) result.put(String.valueOf(entry.getKey()), entry.getValue());
+        }
+        return result;
+    }
+
+    static String currentSelectedText() {
+        if (!FocusBridgeSettings.getInstance().data().sendText) return null;
+        Component focus = KeyboardFocusManager.getCurrentKeyboardFocusManager().getPermanentFocusOwner();
+        Editor focusedEditor = editorFrom(focus);
+        Editor editor = focusedEditor != null ? focusedEditor : selectedEditor(focus);
+        if (editor == null || editor.isDisposed()) return null;
+
+        var caret = editor.getCaretModel().getPrimaryCaret();
+        return caret.hasSelection() ? caret.getSelectedText() : "";
+    }
+
     private static long editorOpenedAt(Editor editor) {
         if (editor == null || editor.isDisposed()) return 0;
         VirtualFile file = FileDocumentManager.getInstance().getFile(editor.getDocument());
@@ -324,6 +397,11 @@ final class FocusSnapshotCollector {
             result.put("kind", symbolKind(resolved));
             String type = typeText(resolved);
             if (type != null && !type.isBlank()) result.put("type", type);
+            if ("method".equals(result.get("kind")) && type != null && !type.isBlank()) {
+                result.put("returnType", type);
+                List<Map<String, Object>> parameters = methodParameters(resolved);
+                if (!parameters.isEmpty()) result.put("parameters", parameters);
+            }
             List<Map<String, Object>> members = members(resolved);
             if (!members.isEmpty()) result.put("members", members);
         } else {

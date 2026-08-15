@@ -85,6 +85,7 @@ WebSocket 连接建立后发送一次，用于识别这是 Fast Idea Bridge 插�
     "nativeWindows": {},
     "capabilities": [
       "state",
+      "getSelectedText",
       "navigate",
       "select",
       "find",
@@ -144,13 +145,31 @@ IDEA Swing 焦点变化、键盘输入或鼠标输入后发送。消息正文是
 
 其 `payload` 与 `focus.changed` 相同，包含 `focus` 和 `activeEditor`。
 
-### 3.4 `editor.caretChanged`
+### 3.4 `editor.statusChanged`
 
-编辑器光标位置、选择范围或多光标状态变化后发送。其 `payload` 与其他快照事件相同，但主要关注 `activeEditor.caret`、`activeEditor.selection` 和 `activeEditor.carets`。
+输入能力或当前对象信息发生变化后发送一次。光标和文档变化不会再直接发送高频事件；插件只在对象信息签名或 `inputable` 值变化时发送该状态消息。
 
-### 3.5 `editor.documentChanged`
+```json
+{
+  "type": "editor.statusChanged",
+  "payload": {
+    "inputable": true,
+    "objectInfo": {
+      "context": "none",
+      "expressionContext": {
+        "expression": "response.data.user",
+        "kind": "property",
+        "type": "com.example.User",
+        "members": []
+      }
+    },
+    "focus": {},
+    "activeEditor": {}
+  }
+}
+```
 
-编辑器文档内容变化后发送。其 `payload` 与其他快照事件相同；如果设置中开启发送文本，还会包含文本上下文。
+`objectInfo` 是精简对象信息；需要实时读取时可以使用 `command.getObjectInfo`。需要实时读取输入能力时可以使用 `command.getInputable`。
 
 ## 四、快照 `payload` 字段
 
@@ -383,9 +402,42 @@ IDEA Swing 焦点变化、键盘输入或鼠标输入后发送。消息正文是
 }
 ```
 
+### 5.2a `command.getInputable`
+
+在插件 UI 线程实时读取当前焦点是否可以输入文本，返回 `data: true` 或 `data: false`，不依赖 Fast 端缓存。
+
+### 5.2b `command.getObjectInfo`
+
+在插件 UI 线程实时读取当前对象信息，返回 `data` 为 `objectInfo`，包括文件、语法上下文、表达式、对象类型、成员、方法参数和方法返回类型；无法解析时返回已有的表达式和 `kind`，没有当前编辑器时返回 `null`。
+
+### 5.2c `command.getSelectedText`
+
+主动在插件 UI 线程读取当前编辑器的主光标选中文本，不依赖 Fast 端缓存的编辑器快照。成功响应的 `data` 是选中文本；没有选中内容时为空字符串；没有可用编辑器或关闭 `sendText` 时为 `null`（某些客户端可能省略 `data` 字段）。该只读命令不要求 `target.instanceId`，但 Fast 端快捷方法会自动补充当前实例和项目目标。
+
+```json
+{
+  "id": "selected-text-1",
+  "type": "command.getSelectedText",
+  "target": {"instanceId": "bridge.hello 中的 instanceId"},
+  "payload": {}
+}
+```
+
+```json
+{
+  "type": "command.result",
+  "replyTo": "selected-text-1",
+  "payload": {
+    "success": true,
+    "command": "command.getSelectedText",
+    "data": "selected source text"
+  }
+}
+```
+
 ### 5.3 `command.listProjects`
 
-### 5.2a `command.isFullScreen`
+### 5.2d `command.isFullScreen`
 
 查询目标项目窗口当前是否全屏。该命令可以携带 `target.instanceId` 以及项目身份字段；成功响应的 `data.fullScreen` 为布尔值。
 
@@ -836,15 +888,15 @@ Node.js 服务端还提供两个快捷查询方法。它们使用 `f.fast.curren
 const projectName = f.ideaFocusBridge.getCurrentProjectName()
 const filePath = f.ideaFocusBridge.getCurrentFilePath()
 const line = f.ideaFocusBridge.getCurrentLine()
-const selectedText = f.ideaFocusBridge.getCurrentSelectedText()
+const selectedText = await f.ideaFocusBridge.getCurrentSelectedText()
 ```
 
-只有当前 Windows 前台窗口属于某个已连接的 IDEA 实例时，方法才会返回最近一次编辑器状态中的值；否则返回 `null`。
+只有当前 Windows 前台窗口属于某个已连接的 IDEA 实例时，方法才会通过 `command.getSelectedText` 主动读取插件当前值；否则返回 `null`。
 
 - `getCurrentProjectName()`：返回当前 IDEA 编辑器所属项目名。
 - `getCurrentFilePath()`：返回当前 IDEA 编辑器文件的绝对路径。
 - `getCurrentLine()`：返回当前光标所在的 1-based 行号。
-- `getCurrentSelectedText()`：返回当前选中的文本；没有选择时返回空字符串。
+- `getCurrentSelectedText()`：返回一个 Promise，主动读取当前选中的文本；没有选择时返回空字符串。
 
 如果 IDEA 未开启文本发送，或当前没有可用编辑器，`getCurrentSelectedText()` 返回 `null`。
 
@@ -864,7 +916,7 @@ editor.getCurrentProjectName()
 editor.getCurrentProjectBasePath()
 editor.getCurrentFilePath()
 editor.getCurrentLine()
-editor.getCurrentSelectedText()
+await editor.getCurrentSelectedText()
 editor.getCurrentEditor()
 editor.getCurrentInfo()           // 一次返回当前编辑器的常用信息
 ```

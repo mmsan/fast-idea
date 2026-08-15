@@ -66,11 +66,13 @@ Navigation, selection, focus, and full-screen commands require `target.instanceI
 
 ## Events
 
-The plugin sends `bridge.hello`, `focus.changed`, `editor.state`, `editor.caretChanged`, and `editor.documentChanged`. Every message has `version`, `id`, `type`, `timestamp`, `sequence`, and `payload`.
+The plugin sends `bridge.hello`, `focus.changed`, `editor.state`, and `editor.statusChanged`. `editor.statusChanged` is emitted only when inputability or the current object information changes; caret and document changes are no longer sent as high-frequency events. Every message has `version`, `id`, `type`, `timestamp`, `sequence`, and `payload`.
 
-`payload.focus` describes the actual Swing focus owner. `payload.activeEditor` independently describes the selected code editor, file, caret, selections, and optional text context. It also includes the generic `context` and optional `expressionContext` (expression, kind, type, and at most 15 members). `payload.fullScreen` is the current IDE full-screen state. `payload.editorOpenedAt` is the Unix millisecond timestamp when the current editor became active. The handshake payload also includes these full-screen decision fields; the Fast service only evaluates automatic full-screen on `bridge.hello`.
+`payload.focus` describes the actual Swing focus owner. `payload.activeEditor` independently describes the selected code editor, file, caret, selections, and optional text context. It also includes the generic `context` and optional `expressionContext` (expression, kind, type, method return types, parameters, and at most 15 members). `editor.statusChanged.payload.inputable` is the current inputability and `editor.statusChanged.payload.objectInfo` contains the reduced object context. `payload.fullScreen` is the current IDE full-screen state. `payload.editorOpenedAt` is the Unix millisecond timestamp when the current editor became active. The handshake payload also includes these full-screen decision fields; the Fast service only evaluates automatic full-screen on `bridge.hello`.
 
 ## Commands
+
+三个插件都支持通过 `command.getInputable`、`command.getObjectInfo` 和 `command.getSelectedText` 主动读取当前状态；Fast 端快捷调用为 `await f.editorBridge.getCurrentInputable()`、`await f.editorBridge.getCurrentObjectInfo()` 和 `await f.editorBridge.getCurrentSelectedText()`。没有可用编辑器时对象信息返回 `null`。
 
 全屏状态可以通过 `command.isFullScreen` 查询，返回 `data.fullScreen`。自动全屏会在握手后查询，确认未全屏才发送 `command.fullScreen`，切换后再次查询确认，并在窗口尚未就绪时重试。
 

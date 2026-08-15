@@ -49,6 +49,8 @@ public final class FocusBridgeService implements Disposable {
     private volatile String connectionId = UUID.randomUUID().toString();
     private volatile WebSocket socket;
     private volatile ScheduledFuture<?> pendingSnapshot;
+    private volatile ScheduledFuture<?> pendingStatus;
+    private volatile String lastStatusSignature;
     private volatile int reconnectAttempt;
     private volatile long lastPongMillis;
     private PropertyChangeListener focusListener;
@@ -68,22 +70,27 @@ public final class FocusBridgeService implements Disposable {
     public void start() {
         if (!started.compareAndSet(false, true)) return;
         BridgeLog.info("service started; autoConnect=" + FocusBridgeSettings.getInstance().data().autoConnect);
-        focusListener = event -> scheduleSnapshot("focus.changed", 0);
+        focusListener = event -> {
+            scheduleSnapshot("focus.changed", 0);
+            scheduleStatus(0);
+        };
         KeyboardFocusManager.getCurrentKeyboardFocusManager()
                 .addPropertyChangeListener("permanentFocusOwner", focusListener);
         inputListener = event -> {
             if (event instanceof KeyEvent key && key.getID() == KeyEvent.KEY_RELEASED) {
                 scheduleSnapshot("focus.changed", 80);
+                scheduleStatus(80);
             } else if (event instanceof MouseEvent mouse && mouse.getID() == MouseEvent.MOUSE_RELEASED) {
                 scheduleSnapshot("focus.changed", 40);
+                scheduleStatus(40);
             }
         };
         Toolkit.getDefaultToolkit().addAWTEventListener(inputListener, AWTEvent.KEY_EVENT_MASK | AWTEvent.MOUSE_EVENT_MASK);
         EditorFactory.getInstance().getEventMulticaster().addCaretListener(new CaretListener() {
-            @Override public void caretPositionChanged(CaretEvent event) { scheduleSnapshot("editor.caretChanged", 40); }
+            @Override public void caretPositionChanged(CaretEvent event) { scheduleStatus(40); }
         }, this);
         EditorFactory.getInstance().getEventMulticaster().addDocumentListener(new DocumentListener() {
-            @Override public void documentChanged(DocumentEvent event) { scheduleSnapshot("editor.documentChanged", 100); }
+            @Override public void documentChanged(DocumentEvent event) { scheduleStatus(100); }
         }, this);
         executor.scheduleWithFixedDelay(this::heartbeat, 2, 2, TimeUnit.SECONDS);
         localPluginUpdateChecker.start();
@@ -167,6 +174,22 @@ public final class FocusBridgeService implements Disposable {
         }), delayMs, TimeUnit.MILLISECONDS);
     }
 
+    private void scheduleStatus(long delayMs) {
+        ScheduledFuture<?> old = pendingStatus;
+        if (old != null) old.cancel(false);
+        pendingStatus = executor.schedule(() -> ApplicationManager.getApplication().invokeLater(() -> {
+            Map<String, Object> status = FocusSnapshotCollector.collectStatus();
+            Map<String, Object> key = new LinkedHashMap<>();
+            key.put("inputable", status.get("inputable"));
+            key.put("objectInfo", status.get("objectInfo"));
+            String signature = gson.toJson(key);
+            if (!signature.equals(lastStatusSignature)) {
+                lastStatusSignature = signature;
+                send("editor.statusChanged", status, null);
+            }
+        }), delayMs, TimeUnit.MILLISECONDS);
+    }
+
     void send(String type, Object payload, String replyTo) {
         WebSocket ws = socket;
         if (ws == null || ws.isOutputClosed()) return;
@@ -191,12 +214,14 @@ public final class FocusBridgeService implements Disposable {
             if (expectedGeneration != generation.get()) { webSocket.abort(); return; }
             connectionId = UUID.randomUUID().toString();
             socket = webSocket; reconnectAttempt = 0; reconnectScheduled.set(false);
+            lastStatusSignature = null;
             int failures = connectionFailures.getAndSet(0);
             BridgeLog.info("connected" + (failures > 0 ? "; recoveredAfterFailures=" + failures : ""));
             lastPongMillis = System.currentTimeMillis();
             ApplicationManager.getApplication().invokeLater(() -> {
                 send("bridge.hello", BridgeCommands.identity(), null);
                 scheduleSnapshot("editor.state", 0);
+                scheduleStatus(0);
             });
             webSocket.request(1);
         }
