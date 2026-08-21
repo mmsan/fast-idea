@@ -33,6 +33,9 @@ import java.util.concurrent.atomic.AtomicLong;
 
 @Service(Service.Level.APP)
 public final class FocusBridgeService implements Disposable {
+    private static final long SLOW_RECONNECT_AFTER_MS = TimeUnit.MINUTES.toMillis(5);
+    private static final long SLOW_RECONNECT_DELAY_MS = TimeUnit.SECONDS.toMillis(6);
+    private static final long CONNECTION_LOG_INTERVAL_MS = TimeUnit.MINUTES.toMillis(1);
     private final Gson gson = new Gson();
     private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "fast-idea-bridge"); t.setDaemon(true); return t;
@@ -44,6 +47,7 @@ public final class FocusBridgeService implements Disposable {
     private final AtomicLong generation = new AtomicLong();
     private final AtomicLong sequence = new AtomicLong();
     private final AtomicInteger connectionFailures = new AtomicInteger();
+    private final Map<String, ConnectionLogState> connectionLogStates = new ConcurrentHashMap<>();
     private final LocalPluginUpdateChecker localPluginUpdateChecker = new LocalPluginUpdateChecker();
     private final String instanceId = UUID.randomUUID().toString();
     private volatile String connectionId = UUID.randomUUID().toString();
@@ -52,6 +56,8 @@ public final class FocusBridgeService implements Disposable {
     private volatile ScheduledFuture<?> pendingStatus;
     private volatile String lastStatusSignature;
     private volatile int reconnectAttempt;
+    private volatile long reconnectStartedAt;
+    private volatile boolean slowReconnectLogged;
     private volatile long lastPongMillis;
     private PropertyChangeListener focusListener;
     private AWTEventListener inputListener;
@@ -102,6 +108,8 @@ public final class FocusBridgeService implements Disposable {
         long ignored = generation.incrementAndGet();
         reconnectScheduled.set(false);
         reconnectAttempt = 0;
+        reconnectStartedAt = 0;
+        slowReconnectLogged = false;
         WebSocket old = socket; socket = null;
         if (old != null) old.sendClose(WebSocket.NORMAL_CLOSURE, "settings changed");
         if (FocusBridgeSettings.getInstance().data().autoConnect) connect();
@@ -127,16 +135,37 @@ public final class FocusBridgeService implements Disposable {
 
     private void recordConnectionFailure(String message, Throwable error) {
         int count = connectionFailures.incrementAndGet();
-        if (count <= 3 || count % 10 == 0) BridgeLog.warn(message + "; attempt=" + count, error);
+        logConnectionEvent("failure", message + "; attempt=" + count, error, true);
+    }
+
+    private synchronized void logConnectionEvent(String kind, String message, Throwable error, boolean warning) {
+        long now = System.currentTimeMillis();
+        ConnectionLogState state = connectionLogStates.computeIfAbsent(kind, ignored -> new ConnectionLogState());
+        state.count++;
+        if (state.count <= 3 || now - state.lastLoggedAt >= CONNECTION_LOG_INTERVAL_MS) {
+            String suffix = state.suppressed > 0 ? "; suppressed=" + state.suppressed : "";
+            state.lastLoggedAt = now;
+            state.suppressed = 0;
+            if (warning) BridgeLog.warn(message + suffix, error);
+            else BridgeLog.info(message + suffix);
+        } else {
+            state.suppressed++;
+        }
     }
 
     private void scheduleReconnect(long expectedGeneration) {
         if (!FocusBridgeSettings.getInstance().data().autoConnect || expectedGeneration != generation.get()) return;
         if (!reconnectScheduled.compareAndSet(false, true)) return;
         int[] delays = {200, 500, 1_000, 2_000};
-        int delay = delays[Math.min(reconnectAttempt++, delays.length - 1)];
-        if (reconnectAttempt <= 3 || reconnectAttempt % 10 == 0) {
-            BridgeLog.info("reconnect scheduled; delayMs=" + delay);
+        if (reconnectStartedAt == 0) reconnectStartedAt = System.currentTimeMillis();
+        long retryingForMs = System.currentTimeMillis() - reconnectStartedAt;
+        long delay = retryingForMs >= SLOW_RECONNECT_AFTER_MS
+                ? SLOW_RECONNECT_DELAY_MS
+                : delays[Math.min(reconnectAttempt++, delays.length - 1)];
+        if (delay == SLOW_RECONNECT_DELAY_MS && !slowReconnectLogged) {
+            slowReconnectLogged = true;
+            BridgeLog.info("connection remains unavailable for " + retryingForMs / 1_000
+                    + "s; retry delay increased to " + SLOW_RECONNECT_DELAY_MS + "ms");
         }
         executor.schedule(() -> {
             reconnectScheduled.set(false);
@@ -151,7 +180,7 @@ public final class FocusBridgeService implements Disposable {
         if (lastPongMillis > 0 && now - lastPongMillis > 6_000) {
             if (socket == ws) socket = null;
             ws.abort();
-            BridgeLog.warn("heartbeat timeout; reconnecting", null);
+            recordConnectionFailure("heartbeat timeout; reconnecting", null);
             scheduleReconnect(generation.get());
             return;
         }
@@ -159,7 +188,7 @@ public final class FocusBridgeService implements Disposable {
         ws.sendPing(ping).exceptionally(error -> {
             if (socket == ws) socket = null;
             ws.abort();
-            BridgeLog.warn("ping failed; reconnecting", error);
+            recordConnectionFailure("ping failed; reconnecting", error);
             scheduleReconnect(generation.get());
             return null;
         });
@@ -200,7 +229,7 @@ public final class FocusBridgeService implements Disposable {
         message.put("sequence", sequence.incrementAndGet()); message.put("payload", payload);
         message.put("source", BridgeCommands.source(instanceId, connectionId, payload));
         ws.sendText(gson.toJson(message), true).exceptionally(error -> {
-            BridgeLog.warn("message send failed; type=" + type, error);
+            logConnectionEvent("send:" + type, "message send failed; type=" + type, error, true);
             return null;
         });
     }
@@ -214,6 +243,7 @@ public final class FocusBridgeService implements Disposable {
             if (expectedGeneration != generation.get()) { webSocket.abort(); return; }
             connectionId = UUID.randomUUID().toString();
             socket = webSocket; reconnectAttempt = 0; reconnectScheduled.set(false);
+            reconnectStartedAt = 0; slowReconnectLogged = false;
             lastStatusSignature = null;
             int failures = connectionFailures.getAndSet(0);
             BridgeLog.info("connected" + (failures > 0 ? "; recoveredAfterFailures=" + failures : ""));
@@ -254,7 +284,7 @@ public final class FocusBridgeService implements Disposable {
 
         @Override public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
             if (socket == webSocket) socket = null;
-            BridgeLog.info("connection closed; code=" + statusCode + "; reason=" + reason);
+            logConnectionEvent("closed", "connection closed; code=" + statusCode + "; reason=" + reason, null, false);
             scheduleReconnect(expectedGeneration);
             return CompletableFuture.completedFuture(null);
         }
@@ -264,6 +294,12 @@ public final class FocusBridgeService implements Disposable {
             recordConnectionFailure("socket error", error);
             scheduleReconnect(expectedGeneration);
         }
+    }
+
+    private static final class ConnectionLogState {
+        int count;
+        long lastLoggedAt;
+        int suppressed;
     }
 
     @Override public void dispose() {

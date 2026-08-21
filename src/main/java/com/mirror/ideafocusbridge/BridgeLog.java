@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.time.Instant;
@@ -20,6 +21,8 @@ final class BridgeLog {
     private static final Path LOG_DIRECTORY = Path.of(PathManager.getLogPath(), "fast-idea-bridge");
     private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ISO_LOCAL_DATE;
     private static final Duration RETENTION = Duration.ofDays(3);
+    private static final long MAX_LOG_FILE_BYTES = 5L * 1024 * 1024;
+    private static final int LOG_BACKUP_COUNT = 2;
     private static final Object LOCK = new Object();
 
     private BridgeLog() {}
@@ -47,6 +50,7 @@ final class BridgeLog {
                 Files.createDirectories(LOG_DIRECTORY);
                 prune();
                 Path file = LOG_DIRECTORY.resolve(FILE_PREFIX + LocalDate.now().format(DATE_FORMAT) + ".log");
+                rotateIfNeeded(file, line);
                 Files.writeString(file, line, StandardCharsets.UTF_8,
                         StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND);
             } catch (IOException ignored) {
@@ -55,9 +59,20 @@ final class BridgeLog {
         }
     }
 
+    private static void rotateIfNeeded(Path file, String line) throws IOException {
+        if (!Files.exists(file) || Files.size(file) + line.getBytes(StandardCharsets.UTF_8).length <= MAX_LOG_FILE_BYTES) return;
+        Path oldest = Path.of(file + "." + LOG_BACKUP_COUNT);
+        Files.deleteIfExists(oldest);
+        for (int index = LOG_BACKUP_COUNT - 1; index >= 1; index--) {
+            Path source = Path.of(file + "." + index);
+            if (Files.exists(source)) Files.move(source, Path.of(file + "." + (index + 1)), StandardCopyOption.REPLACE_EXISTING);
+        }
+        Files.move(file, Path.of(file + ".1"), StandardCopyOption.REPLACE_EXISTING);
+    }
+
     private static void prune() throws IOException {
         Instant cutoff = Instant.now().minus(RETENTION);
-        try (DirectoryStream<Path> files = Files.newDirectoryStream(LOG_DIRECTORY, FILE_PREFIX + "*.log")) {
+        try (DirectoryStream<Path> files = Files.newDirectoryStream(LOG_DIRECTORY, FILE_PREFIX + "*.log*")) {
             for (Path file : files) {
                 if (Files.getLastModifiedTime(file).toInstant().isBefore(cutoff)) Files.deleteIfExists(file);
             }
