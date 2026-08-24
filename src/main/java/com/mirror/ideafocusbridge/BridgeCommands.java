@@ -18,6 +18,7 @@ import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.IdeFocusManager;
 import com.intellij.openapi.wm.WindowManager;
 import com.intellij.openapi.wm.ex.IdeFrameEx;
+import com.intellij.util.concurrency.AppExecutorUtil;
 import com.sun.jna.Native;
 import com.sun.jna.Pointer;
 
@@ -36,6 +37,8 @@ import java.util.regex.PatternSyntaxException;
 import java.util.concurrent.TimeUnit;
 
 final class BridgeCommands {
+    private static String lastSelectedText;
+
     private BridgeCommands() {}
 
     static Map<String, Object> identity() {
@@ -145,7 +148,7 @@ final class BridgeCommands {
                 case "command.getObjectInfo" -> ApplicationManager.getApplication().invokeLater(() ->
                         bridge.send("command.result", result(true, type, FocusSnapshotCollector.currentObjectInfo()), commandId));
                 case "command.getSelectedText" -> ApplicationManager.getApplication().invokeLater(() ->
-                        bridge.send("command.result", result(true, type, FocusSnapshotCollector.currentSelectedText()), commandId));
+                        selectedText(commandId, bridge));
                 case "command.getCurrentLineContent" -> ApplicationManager.getApplication().invokeLater(() ->
                         bridge.send("command.result", result(true, type, FocusSnapshotCollector.currentLineContent()), commandId));
                 case "command.isFullScreen" -> ApplicationManager.getApplication().invokeLater(() ->
@@ -165,6 +168,23 @@ final class BridgeCommands {
         } catch (RuntimeException e) {
             bridge.send("command.result", error("unknown", "INVALID_MESSAGE", e.getMessage()), id);
         }
+    }
+
+    private static void selectedText(String commandId, FocusBridgeService bridge) {
+        String selectedText = FocusSnapshotCollector.currentSelectedText();
+        if (selectedText == null || !Objects.equals(selectedText, lastSelectedText)) {
+            if (selectedText != null) lastSelectedText = selectedText;
+            bridge.send("command.result", result(true, "command.getSelectedText", selectedText), commandId);
+            return;
+        }
+
+        AppExecutorUtil.getAppScheduledExecutorService().schedule(() ->
+                ApplicationManager.getApplication().invokeLater(() -> {
+                    String refreshedText = FocusSnapshotCollector.currentSelectedText();
+                    if (refreshedText != null) lastSelectedText = refreshedText;
+                    bridge.send("command.result", result(true, "command.getSelectedText",
+                            refreshedText != null ? refreshedText : selectedText), commandId);
+                }), 80, TimeUnit.MILLISECONDS);
     }
 
     private static boolean validateInstanceTarget(String type, JsonObject target, FocusBridgeService bridge) {

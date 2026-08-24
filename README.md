@@ -10,6 +10,8 @@ IntelliJ Platform plugin that connects IDE focus/editor state with the Fast appl
 - The plugin uses only the common Platform module, so it can run in IDEA and other JetBrains IDEs.
 - Local connection health: sends a WebSocket Ping every 2 seconds, treats 6 seconds without a Pong as disconnected, uses a 1-second handshake timeout, and reconnects with 200/500/1000/2000-ms backoff (then every 2 seconds).
 
+`command.getSelectedText` returns a changed selection immediately. If it matches the previous active read, the plugin reads again after 80 ms and returns the latest value.
+
 ## 日志
 
 插件使用 IntelliJ 的 `Logger` 写入宿主 `idea.log`；发生连接失败、心跳超时或发送失败时会记录简短告警。也会在 IDEA 的标准日志目录下写入 `fast-idea-bridge/fast-idea-bridge-YYYY-MM-DD.log`，仅保留最近 3 天的日志。可通过 **Help | Show Log in Explorer** 打开日志目录。
