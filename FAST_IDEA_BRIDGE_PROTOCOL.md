@@ -86,6 +86,7 @@ WebSocket 连接建立后发送一次，用于识别这是 Fast Idea Bridge 插�
     "capabilities": [
       "state",
       "getSelectedText",
+      "getCurrentLineContent",
       "navigate",
       "select",
       "find",
@@ -416,7 +417,7 @@ IDEA Swing 焦点变化、键盘输入或鼠标输入后发送。消息正文是
 
 ### 5.2d `command.getSelectedText`
 
-主动在插件 UI 线程读取当前编辑器的主光标选中文本，不依赖 Fast 端缓存的编辑器快照。插件会记住上次主动读取的结果；新结果不同则立即返回，相同则在 80 毫秒后复读一次并返回最新结果。成功响应的 `data` 是选中文本；没有选中内容时为空字符串；没有可用编辑器或关闭 `sendText` 时为 `null`（某些客户端可能省略 `data` 字段）。该只读命令不要求 `target.instanceId`，但 Fast 端快捷方法会自动补充当前实例和项目目标。
+主动在插件 UI 线程读取当前编辑器的主光标选中文本，不依赖 Fast 端缓存的编辑器快照。插件会记住上次主动读取的结果；新结果不同则立即返回，相同时每隔 30 毫秒复读一次，发现变化便提前返回，始终相同则在 200 毫秒时返回最新结果。成功响应的 `data` 是选中文本；没有选中内容时为空字符串；没有可用编辑器或关闭 `sendText` 时为 `null`（某些客户端可能省略 `data` 字段）。该只读命令不要求 `target.instanceId`，但 Fast 端快捷方法会自动补充当前实例和项目目标。
 
 ```json
 {

@@ -135,8 +135,8 @@ final class FocusSnapshotCollector {
     static String currentLineContent() {
         if (!FocusBridgeSettings.getInstance().data().sendText) return null;
         Component focus = KeyboardFocusManager.getCurrentKeyboardFocusManager().getPermanentFocusOwner();
-        if (focus instanceof JTextComponent) return null;
         Editor editor = editorFrom(focus);
+        if (editor == null && focus instanceof JTextComponent) return null;
         if (editor == null || editor.isDisposed()) return null;
 
         var document = editor.getDocument();

@@ -37,6 +37,8 @@ import java.util.regex.PatternSyntaxException;
 import java.util.concurrent.TimeUnit;
 
 final class BridgeCommands {
+    private static final int SELECTED_TEXT_POLL_INTERVAL_MS = 30;
+    private static final int SELECTED_TEXT_MAX_WAIT_MS = 200;
     private static String lastSelectedText;
 
     private BridgeCommands() {}
@@ -61,7 +63,7 @@ final class BridgeCommands {
         if (activeEditor instanceof Map<?, ?> editor) {
             payload.put("activeProject", editor.get("project"));
         }
-        payload.put("capabilities", List.of("state", "getInputable", "getContext", "getObjectInfo", "getSelectedText", "navigate", "select", "find", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages"));
+        payload.put("capabilities", List.of("state", "getInputable", "getContext", "getObjectInfo", "getSelectedText", "getCurrentLineContent", "navigate", "select", "find", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages"));
         return payload;
     }
 
@@ -178,13 +180,27 @@ final class BridgeCommands {
             return;
         }
 
+        pollSelectedText(commandId, bridge, selectedText, 0);
+    }
+
+    private static void pollSelectedText(String commandId, FocusBridgeService bridge,
+                                         String previousText, int elapsedMs) {
+        int delayMs = Math.min(SELECTED_TEXT_POLL_INTERVAL_MS, SELECTED_TEXT_MAX_WAIT_MS - elapsedMs);
         AppExecutorUtil.getAppScheduledExecutorService().schedule(() ->
                 ApplicationManager.getApplication().invokeLater(() -> {
                     String refreshedText = FocusSnapshotCollector.currentSelectedText();
-                    if (refreshedText != null) lastSelectedText = refreshedText;
-                    bridge.send("command.result", result(true, "command.getSelectedText",
-                            refreshedText != null ? refreshedText : selectedText), commandId);
-                }), 80, TimeUnit.MILLISECONDS);
+                    int nextElapsedMs = elapsedMs + delayMs;
+                    if (refreshedText != null && !Objects.equals(refreshedText, previousText)) {
+                        lastSelectedText = refreshedText;
+                        bridge.send("command.result", result(true, "command.getSelectedText", refreshedText), commandId);
+                    } else if (nextElapsedMs >= SELECTED_TEXT_MAX_WAIT_MS) {
+                        if (refreshedText != null) lastSelectedText = refreshedText;
+                        bridge.send("command.result", result(true, "command.getSelectedText",
+                                refreshedText != null ? refreshedText : previousText), commandId);
+                    } else {
+                        pollSelectedText(commandId, bridge, previousText, nextElapsedMs);
+                    }
+                }), delayMs, TimeUnit.MILLISECONDS);
     }
 
     private static boolean validateInstanceTarget(String type, JsonObject target, FocusBridgeService bridge) {

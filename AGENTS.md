@@ -113,7 +113,7 @@ Publish with:
 
 The workflow must increment the patch version, restore it on failure, build the plugin, copy the ZIP to `D:\docker\www\idea-plugins`, verify the new ZIP URL returns HTTP 200 with non-empty `Content-Length`, atomically replace `updatePlugins.xml`, and verify both the metadata URL and its version/ZIP entry. If post-publish verification fails, restore the previous metadata and remove the newly published ZIP. Use `-NoVersionBump` only to retry a version already incremented by an interrupted/manual workflow; IDEA requires a higher repository version to detect an update.
 
-For a coordinated release, use the shared highest-version rule in `D:\v\fast\AGENTS.md`: set the target version before publishing, then run this script with `-NoVersionBump`. Do not independently bump IDEA when the other two plugins are part of the same release.
+For a coordinated three-plugin release, use the executable one-command runbook in `D:\v\fast\AGENTS.md` under **Fast path: one-command coordinated local release**. Do not independently bump IDEA when the other two plugins are part of the same release.
 
 For first installation, close all IDEA processes and run:
 

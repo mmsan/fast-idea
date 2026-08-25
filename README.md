@@ -10,7 +10,7 @@ IntelliJ Platform plugin that connects IDE focus/editor state with the Fast appl
 - The plugin uses only the common Platform module, so it can run in IDEA and other JetBrains IDEs.
 - Local connection health: sends a WebSocket Ping every 2 seconds, treats 6 seconds without a Pong as disconnected, uses a 1-second handshake timeout, and reconnects with 200/500/1000/2000-ms backoff (then every 2 seconds).
 
-`command.getSelectedText` returns a changed selection immediately. If it matches the previous active read, the plugin reads again after 80 ms and returns the latest value.
+`command.getSelectedText` returns a changed selection immediately. If it matches the previous active read, the plugin polls every 30 ms, returns as soon as the value changes, and otherwise returns the latest value after 200 ms.
 
 ## 日志
 
