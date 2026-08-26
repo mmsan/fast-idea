@@ -2,10 +2,14 @@ package com.mirror.ideafocusbridge;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.intellij.ide.DataManager;
+import com.intellij.openapi.actionSystem.IdeActions;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.editor.LogicalPosition;
 import com.intellij.openapi.editor.ScrollType;
+import com.intellij.openapi.editor.actionSystem.EditorActionHandler;
+import com.intellij.openapi.editor.actionSystem.EditorActionManager;
 import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.fileEditor.OpenFileDescriptor;
@@ -63,7 +67,7 @@ final class BridgeCommands {
         if (activeEditor instanceof Map<?, ?> editor) {
             payload.put("activeProject", editor.get("project"));
         }
-        payload.put("capabilities", List.of("state", "getInputable", "getContext", "getObjectInfo", "getSelectedText", "getCurrentLineContent", "navigate", "select", "find", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages"));
+        payload.put("capabilities", List.of("state", "getInputable", "getContext", "getObjectInfo", "getSelectedText", "getCurrentLineContent", "navigate", "select", "find", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages", "ctrlW", "shiftHome"));
         return payload;
     }
 
@@ -161,6 +165,8 @@ final class BridgeCommands {
                 case "command.find" ->
                         ApplicationManager.getApplication().invokeLater(() -> find(payload, target, commandId, bridge));
                 case "command.requestFocus" -> ApplicationManager.getApplication().invokeLater(() -> requestFocus(commandId, bridge));
+                case "command.ctrlW" -> ApplicationManager.getApplication().invokeLater(() -> ctrlW(target, commandId, bridge));
+                case "command.shiftHome" -> ApplicationManager.getApplication().invokeLater(() -> shiftHome(target, commandId, bridge));
                 case "command.fullScreen" -> ApplicationManager.getApplication().invokeLater(() -> fullScreen(target, commandId, bridge));
                 case "command.copyResourcePath" -> ApplicationManager.getApplication().invokeLater(() -> copyResourcePath(commandId, bridge));
                 case "command.queryPythonPackages" -> ApplicationManager.getApplication().invokeLater(() ->
@@ -209,7 +215,8 @@ final class BridgeCommands {
                 || type.equals("command.find") || type.equals("command.requestFocus")
                 || type.equals("command.fullScreen")
                 || type.equals("command.copyResourcePath")
-                || type.equals("command.queryPythonPackages");
+                || type.equals("command.queryPythonPackages") || type.equals("command.ctrlW")
+                || type.equals("command.shiftHome");
         if (mutating && (targetInstance == null || targetInstance.isBlank())) {
             throw new IllegalArgumentException("target.instanceId is required for this command");
         }
@@ -226,6 +233,37 @@ final class BridgeCommands {
             }
         }
         bridge.send("command.result", error("command.requestFocus", "NO_EDITOR", "No active text editor"), id);
+    }
+
+    private static void ctrlW(JsonObject target, String id, FocusBridgeService bridge) {
+        Project project = resolveProject(target);
+        Editor editor = project == null ? null : FileEditorManager.getInstance(project).getSelectedTextEditor();
+        if (editor == null) {
+            bridge.send("command.result", error("command.ctrlW", "NO_EDITOR", "No active text editor"), id);
+            return;
+        }
+        EditorActionHandler handler = EditorActionManager.getInstance()
+                .getActionHandler(IdeActions.ACTION_EDITOR_SELECT_WORD_AT_CARET);
+        handler.execute(editor, editor.getCaretModel().getPrimaryCaret(),
+                DataManager.getInstance().getDataContext(editor.getContentComponent()));
+        bridge.send("command.result", result(true, "command.ctrlW", Map.of("handled", true)), id);
+    }
+
+
+    private static void shiftHome(JsonObject target, String id, FocusBridgeService bridge) {
+        Project project = resolveProject(target);
+        Editor editor = project == null ? null : FileEditorManager.getInstance(project).getSelectedTextEditor();
+        if (editor == null) {
+            bridge.send("command.result", error("command.shiftHome", "NO_EDITOR", "No active text editor"), id);
+            return;
+        }
+        EditorActionHandler handler = EditorActionManager.getInstance()
+                .getActionHandler("EditorLineStartWithSelection");
+        var caret = editor.getCaretModel().getPrimaryCaret();
+        var dataContext = DataManager.getInstance().getDataContext(editor.getContentComponent());
+        handler.execute(editor, caret, dataContext);
+        handler.execute(editor, caret, dataContext);
+        bridge.send("command.result", result(true, "command.shiftHome", Map.of("handled", true)), id);
     }
 
     private static void copyResourcePath(String id, FocusBridgeService bridge) {
