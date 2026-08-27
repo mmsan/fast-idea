@@ -6,6 +6,7 @@ import com.intellij.ide.plugins.PluginManagerCore;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ex.ApplicationManagerEx;
 import com.intellij.openapi.extensions.PluginId;
+import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.progress.EmptyProgressIndicator;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.updateSettings.impl.PluginDownloader;
@@ -25,6 +26,7 @@ final class LocalPluginUpdateChecker {
     private static final String PLUGIN_ID = "com.mirror.ideafocusbridge";
     private static final String DEV_MODE_PROPERTY = "fast.idea.bridge.dev";
     private static final String AUTO_RESTART_PROPERTY = "fast.idea.bridge.autoRestart";
+    private static final String DECLINED_VERSION_PROPERTY = "fast.idea.bridge.declinedUpdateVersion";
     private static final String DEFAULT_REPOSITORY =
             "http://127.0.0.1:8800/idea-plugins/updatePlugins.xml";
     private static final int MAX_METADATA_BYTES = 1_048_576;
@@ -111,6 +113,7 @@ final class LocalPluginUpdateChecker {
             lastTriggerMillis = 0;
             return;
         }
+        if (availableVersion.equals(PropertiesComponent.getInstance().getValue(DECLINED_VERSION_PROPERTY))) return;
         if (availableVersion.equals(preparedVersion)) return;
         long now = System.currentTimeMillis();
         if (availableVersion.equals(triggeredVersion) && now - lastTriggerMillis < 10_000) return;
@@ -142,9 +145,11 @@ final class LocalPluginUpdateChecker {
                             "稍后",
                             Messages.getInformationIcon());
                     if (answer == Messages.YES) {
+                        PropertiesComponent.getInstance().unsetValue(DECLINED_VERSION_PROPERTY);
                         BridgeLog.info("local plugin update restart confirmed; version=" + availableVersion);
                         ApplicationManagerEx.getApplicationEx().restart(true);
                     } else {
+                        PropertiesComponent.getInstance().setValue(DECLINED_VERSION_PROPERTY, availableVersion);
                         BridgeLog.info("local plugin update restart deferred; version=" + availableVersion);
                     }
                 });

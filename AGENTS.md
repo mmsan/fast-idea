@@ -82,6 +82,8 @@ For release-quality verification, use:
 .\build-plugin.cmd -Verify
 ```
 
+Keep model-visible verification output concise. Prefer quiet or minimal Gradle output when the wrapper supports it; otherwise capture the wrapper's complete output in a local ignored or temporary log and show only a concise summary. Suppress routine `searchable-options` per-file progress and repeated known environment warnings from the model-visible excerpt, while retaining them in the full log. Always preserve the wrapper's exit code, unexpected warnings, actual Gradle or plugin-verifier failures, the results of `buildPlugin`, `verifyPluginProjectConfiguration`, and `verifyPluginStructure`, and the final artifact's absolute path and size. Do not replace the required wrapper with a direct Gradle command merely to reduce output.
+
 The wrapper always uses the standalone JDK 17 installed at `C:\Program Files\Eclipse Adoptium\jdk-17.0.20.8-hotspot`, never an IntelliJ IDEA JBR or an external `JAVA_HOME` value. The IntelliJ Platform SDK is resolved by Gradle from the configured platform dependency; it is not the installed IDEA application. The wrapper prefers `.gradle-dist\gradle-9.0.0` before the Gradle wrapper, runs `buildPlugin`, verifies the ZIP, and prints its absolute path and size. It also runs `verifyPluginProjectConfiguration` and `verifyPluginStructure` with `-Verify`. The expected artifact is:
 
 ```text

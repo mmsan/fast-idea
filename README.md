@@ -140,7 +140,7 @@ For safety, commands can only open files contained by an open project. Password 
 
 当 IDEA 的 Project View 获得焦点且选中一个或多个文件/目录时，`command.copyResourcePath` 在 `data.paths` 返回全部绝对路径并设置 `data.handled: true`；单选时还保留兼容字段 `data.path`。其他焦点状态或没有选中资源时返回 `data.handled: false`。
 
-本地开发模式通过 `idea.properties` 中的 `fast.idea.bridge.dev=true` 显式开启；`install-local-plugin.cmd` 会自动写入。仅在开发模式下，插件会在启动 10 秒后检查本机自定义插件仓库，之后每 10 秒检查一次。只要本机版本仍低于仓库版本，就会每 10 秒允许重新触发下载，以便从临时失败中恢复。发现新版后使用 IntelliJ 接口下载、校验并登记安装；当 `fast.idea.bridge.autoRestart=true` 时，弹窗询问是否立即重启，只有用户确认后才保存状态、重启 IDEA、应用新版并恢复窗口。两个开关默认均为 `false`，从官方仓库安装时不会启用本地轮询或重启提示。
+本地开发模式通过 `idea.properties` 中的 `fast.idea.bridge.dev=true` 显式开启；`install-local-plugin.cmd` 会自动写入。仅在开发模式下，插件会在启动 10 秒后检查本机自定义插件仓库，之后每 10 秒检查一次。只要本机版本仍低于仓库版本，就会每 10 秒允许重新触发下载，以便从临时失败中恢复。发现新版后使用 IntelliJ 接口下载、校验并登记安装；当 `fast.idea.bridge.autoRestart=true` 时，弹窗询问是否立即重启。选择“稍后”会持久记录该版本，不再提示相同版本；发现更高版本时仍会提示。只有用户确认后才重启 IDEA、应用新版并恢复窗口。两个开关默认均为 `false`，从官方仓库安装时不会启用本地轮询或重启提示。
 
 ## Build
 
