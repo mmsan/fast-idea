@@ -76,6 +76,8 @@ The installable artifact is the ZIP from Gradle `buildPlugin`, not `compileJava`
 .\build-plugin.cmd
 ```
 
+For ordinary code changes, the user prefers source-level validation only. Do not create the installable ZIP unless the user explicitly asks to build a package, verify a package, publish, install, or release. Use the narrowest relevant compile or syntax check instead.
+
 For release-quality verification, use:
 
 ```powershell

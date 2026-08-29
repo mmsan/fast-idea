@@ -36,6 +36,7 @@ public final class FocusBridgeService implements Disposable {
     private static final long SLOW_RECONNECT_AFTER_MS = TimeUnit.MINUTES.toMillis(5);
     private static final long SLOW_RECONNECT_DELAY_MS = TimeUnit.SECONDS.toMillis(6);
     private static final long CONNECTION_LOG_INTERVAL_MS = TimeUnit.MINUTES.toMillis(1);
+    private static final long STARTUP_FULLSCREEN_WINDOW_MS = TimeUnit.SECONDS.toMillis(8);
     private final Gson gson = new Gson();
     private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "fast-idea-bridge"); t.setDaemon(true); return t;
@@ -47,6 +48,7 @@ public final class FocusBridgeService implements Disposable {
     private final AtomicLong generation = new AtomicLong();
     private final AtomicLong sequence = new AtomicLong();
     private final AtomicInteger connectionFailures = new AtomicInteger();
+    private final AtomicBoolean startupFullscreenHandshakeSent = new AtomicBoolean();
     private final Map<String, ConnectionLogState> connectionLogStates = new ConcurrentHashMap<>();
     private final LocalPluginUpdateChecker localPluginUpdateChecker = new LocalPluginUpdateChecker();
     private final String instanceId = UUID.randomUUID().toString();
@@ -246,10 +248,15 @@ public final class FocusBridgeService implements Disposable {
             reconnectStartedAt = 0; slowReconnectLogged = false;
             lastStatusSignature = null;
             int failures = connectionFailures.getAndSet(0);
+            boolean firstBridgeHandshake = startupFullscreenHandshakeSent.compareAndSet(false, true);
             BridgeLog.info("connected" + (failures > 0 ? "; recoveredAfterFailures=" + failures : ""));
             lastPongMillis = System.currentTimeMillis();
             ApplicationManager.getApplication().invokeLater(() -> {
-                send("bridge.hello", BridgeCommands.identity(), null);
+                Map<String, Object> identity = BridgeCommands.identity();
+                if (firstBridgeHandshake) {
+                    identity.put("startupFullScreenUntil", System.currentTimeMillis() + STARTUP_FULLSCREEN_WINDOW_MS);
+                }
+                send("bridge.hello", identity, null);
                 scheduleSnapshot("editor.state", 0);
                 scheduleStatus(0);
             });

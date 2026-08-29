@@ -22,6 +22,7 @@ import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.IdeFocusManager;
 import com.intellij.openapi.wm.WindowManager;
 import com.intellij.openapi.wm.ex.IdeFrameEx;
+import com.intellij.openapi.wm.ex.WindowManagerEx;
 import com.intellij.util.concurrency.AppExecutorUtil;
 import com.sun.jna.Native;
 import com.sun.jna.Pointer;
@@ -308,9 +309,9 @@ final class BridgeCommands {
             return;
         }
 
-        javax.swing.JFrame frame = WindowManager.getInstance().getFrame(project);
-        if (!(frame instanceof IdeFrameEx ideFrame)) {
-            bridge.send("command.result", error("command.fullScreen", "UNSUPPORTED", "Full screen is unavailable"), id);
+        IdeFrameEx ideFrame = ideFrame(project);
+        if (ideFrame == null) {
+            bridge.send("command.result", error("command.fullScreen", "UNSUPPORTED", "Full screen action is unavailable"), id);
             return;
         }
         if (!ideFrame.isInFullScreen()) ideFrame.toggleFullScreen(true);
@@ -325,13 +326,18 @@ final class BridgeCommands {
             return;
         }
 
-        javax.swing.JFrame frame = WindowManager.getInstance().getFrame(project);
-        if (!(frame instanceof IdeFrameEx ideFrame)) {
-            bridge.send("command.result", error("command.isFullScreen", "UNSUPPORTED", "Full screen is unavailable"), id);
+        IdeFrameEx ideFrame = ideFrame(project);
+        if (ideFrame == null) {
+            bridge.send("command.result", result(true, "command.isFullScreen",
+                    Map.of("fullScreen", "unknown", "project", project.getName())), id);
             return;
         }
         bridge.send("command.result", result(true, "command.isFullScreen",
                 Map.of("fullScreen", ideFrame.isInFullScreen(), "project", project.getName())), id);
+    }
+
+    private static IdeFrameEx ideFrame(Project project) {
+        return WindowManagerEx.getInstanceEx().findFrameHelper(project);
     }
 
     private static Project resolveProject(JsonObject target) {
