@@ -68,7 +68,7 @@ final class BridgeCommands {
         if (activeEditor instanceof Map<?, ?> editor) {
             payload.put("activeProject", editor.get("project"));
         }
-        payload.put("capabilities", List.of("state", "getInputable", "getContext", "getObjectInfo", "getSelectedText", "getCurrentLineContent", "navigate", "select", "find", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages", "ctrlW", "ctrlShiftW", "shiftHome"));
+        payload.put("capabilities", List.of("state", "getInputable", "isEditorFocused", "getContext", "getObjectInfo", "getSelectedText", "getCurrentLineContent", "navigate", "select", "find", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages", "ctrlW", "ctrlShiftW", "shiftHome", "moveUpIfLastLine"));
         return payload;
     }
 
@@ -150,6 +150,8 @@ final class BridgeCommands {
                         bridge.send("command.result", result(true, type, FocusSnapshotCollector.collect()), commandId));
                 case "command.getInputable" -> ApplicationManager.getApplication().invokeLater(() ->
                         bridge.send("command.result", result(true, type, FocusSnapshotCollector.currentInputable()), commandId));
+                case "command.isEditorFocused" -> ApplicationManager.getApplication().invokeLater(() ->
+                        bridge.send("command.result", result(true, type, FocusSnapshotCollector.collect().get("activeEditor") instanceof Map<?, ?> editor && Boolean.TRUE.equals(editor.get("ownsFocus"))), commandId));
                 case "command.getContext" -> ApplicationManager.getApplication().invokeLater(() ->
                         bridge.send("command.result", result(true, type, FocusSnapshotCollector.currentContext()), commandId));
                 case "command.getObjectInfo" -> ApplicationManager.getApplication().invokeLater(() ->
@@ -169,6 +171,7 @@ final class BridgeCommands {
                 case "command.ctrlW" -> ApplicationManager.getApplication().invokeLater(() -> ctrlW(target, commandId, bridge));
                 case "command.ctrlShiftW" -> ApplicationManager.getApplication().invokeLater(() -> ctrlShiftW(target, commandId, bridge));
                 case "command.shiftHome" -> ApplicationManager.getApplication().invokeLater(() -> shiftHome(target, commandId, bridge));
+                case "command.moveUpIfLastLine" -> ApplicationManager.getApplication().invokeLater(() -> moveUpIfLastLine(target, commandId, bridge));
                 case "command.fullScreen" -> ApplicationManager.getApplication().invokeLater(() -> fullScreen(target, commandId, bridge));
                 case "command.copyResourcePath" -> ApplicationManager.getApplication().invokeLater(() -> copyResourcePath(commandId, bridge));
                 case "command.queryPythonPackages" -> ApplicationManager.getApplication().invokeLater(() ->
@@ -218,7 +221,7 @@ final class BridgeCommands {
                 || type.equals("command.fullScreen")
                 || type.equals("command.copyResourcePath")
                 || type.equals("command.queryPythonPackages") || type.equals("command.ctrlW") || type.equals("command.ctrlShiftW")
-                || type.equals("command.shiftHome");
+                || type.equals("command.shiftHome") || type.equals("command.moveUpIfLastLine");
         if (mutating && (targetInstance == null || targetInstance.isBlank())) {
             throw new IllegalArgumentException("target.instanceId is required for this command");
         }
@@ -286,6 +289,26 @@ final class BridgeCommands {
             moved = true;
         }
         bridge.send("command.result", result(true, "command.shiftHome", Map.of("handled", moved)), id);
+    }
+
+    private static void moveUpIfLastLine(JsonObject target, String id, FocusBridgeService bridge) {
+        Project project = resolveProject(target);
+        Editor editor = project == null ? null : FileEditorManager.getInstance(project).getSelectedTextEditor();
+        if (editor == null) {
+            bridge.send("command.result", error("command.moveUpIfLastLine", "NO_EDITOR", "No active text editor"), id);
+            return;
+        }
+        var caret = editor.getCaretModel().getPrimaryCaret();
+        var document = editor.getDocument();
+        int line = document.getLineNumber(caret.getOffset());
+        if (line == 0 || !document.getCharsSequence().subSequence(document.getLineEndOffset(line), document.getTextLength()).toString().isBlank()) {
+            bridge.send("command.result", result(true, "command.moveUpIfLastLine", Map.of("handled", false)), id);
+            return;
+        }
+        int column = caret.getLogicalPosition().column;
+        caret.removeSelection();
+        caret.moveToLogicalPosition(new LogicalPosition(line - 1, column));
+        bridge.send("command.result", result(true, "command.moveUpIfLastLine", Map.of("handled", true)), id);
     }
 
     private static void copyResourcePath(String id, FocusBridgeService bridge) {

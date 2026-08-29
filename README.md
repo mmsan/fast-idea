@@ -74,7 +74,7 @@ The plugin sends `bridge.hello`, `focus.changed`, `editor.state`, and `editor.st
 
 ## Commands
 
-三个插件都支持通过 `command.getInputable`、`command.getContext`、`command.getObjectInfo` 和 `command.getSelectedText` 主动读取当前状态；Fast 端快捷调用为 `await f.editorBridge.getCurrentInputable()`、`await f.editorBridge.getCurrentContext()`、`await f.editorBridge.getCurrentObjectInfo()` 和 `await f.editorBridge.getCurrentSelectedText()`。`getContext` 返回 `singleQuote`、`doubleQuote`、`backtick`、`parentheses`、`braces` 或 `none`；没有可用编辑器时返回 `null`。
+三个插件都支持通过 `command.getInputable`、`command.isEditorFocused`、`command.getContext`、`command.getObjectInfo` 和 `command.getSelectedText` 主动读取当前状态；Fast 端快捷调用为 `await f.editorBridge.getCurrentInputable()`、`await f.editorBridge.isEditorFocused()`、`await f.editorBridge.getCurrentContext()`、`await f.editorBridge.getCurrentObjectInfo()` 和 `await f.editorBridge.getCurrentSelectedText()`。`isEditorFocused` 仅在文本编辑器实际拥有键盘焦点时返回 `true`；`getContext` 返回 `singleQuote`、`doubleQuote`、`backtick`、`parentheses`、`braces` 或 `none`；没有可用编辑器时返回 `null`。
 
 全屏状态可以通过 `command.isFullScreen` 查询，返回 `data.fullScreen`。自动全屏会在握手后查询，确认未全屏才发送 `command.fullScreen`，切换后再次查询确认，并在窗口尚未就绪时重试。
 

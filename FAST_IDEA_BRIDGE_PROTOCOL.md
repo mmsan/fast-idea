@@ -87,6 +87,7 @@ WebSocket 连接建立后发送一次，用于识别这是 Fast Idea Bridge 插�
       "state",
       "getSelectedText",
       "getCurrentLineContent",
+      "moveUpIfLastLine",
       "navigate",
       "select",
       "find",
@@ -411,6 +412,10 @@ IDEA Swing 焦点变化、键盘输入或鼠标输入后发送。消息正文是
 
 在插件 UI 线程实时读取当前对象信息，返回 `data` 为 `objectInfo`，包括文件、语法上下文、表达式、对象类型、成员、方法参数和方法返回类型；无法解析时返回已有的表达式和 `kind`，没有当前编辑器时返回 `null`。
 
+### 5.2b `command.isEditorFocused`
+
+同步读取当前文本编辑器是否实际拥有键盘焦点，结果为布尔值 `data`。查找框等其他可编辑输入框拥有焦点时返回 `false`。
+
 ### 5.2c `command.getContext`
 
 在插件 UI 线程实时读取当前主光标所在的语法上下文。成功响应的 `data` 为 `singleQuote`、`doubleQuote`、`backtick`、`parentheses`、`braces` 或 `none`；没有当前编辑器时为 `null`。
@@ -651,6 +656,22 @@ On success, the response contains `startOffset`, `endOffset`, zero-based `line` 
 ```
 
 成功响应的 `data` 包含 `interpreter`、`version`、`environmentType`（如 `venv`、`conda`、`system`）以及按请求名称返回的 `packages` 映射；未安装的包只返回 `installed: false`。
+
+### 5.11 `command.moveUpIfLastLine`
+
+仅当目标编辑器主光标位于最后一个有内容的行（其后仅有空白行）时，清除该光标的选择并上移一行，保持列位置。不是该行或文档只有一行时，命令成功返回 `data.handled: false`，调用方应继续使用原有后备逻辑；无编辑器时返回 `NO_EDITOR`。
+
+```json
+{
+  "id": "move-up-1",
+  "type": "command.moveUpIfLastLine",
+  "target": {
+    "instanceId": "bridge.hello 中的 instanceId",
+    "projectId": "可选项目 ID"
+  },
+  "payload": {}
+}
+```
 
 ## 六、命令响应
 
