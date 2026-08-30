@@ -12,6 +12,10 @@ IntelliJ Platform plugin that connects IDE focus/editor state with the Fast appl
 
 `command.getSelectedText` returns a changed selection immediately. If it matches the previous active read, the plugin polls every 30 ms, returns as soon as the value changes, and otherwise returns the latest value after 200 ms.
 
+`command.home` clears selections and moves carets to logical line starts; `command.shiftDown` and `command.shiftUp` extend selections by logical document lines (`payload.count` defaults to `1`). Soft wrapping does not consume movement steps.
+
+`command.deleteSelection` deletes the current selection only when it exactly matches `payload.expectedText`; a mismatch succeeds without changing the document.
+
 ## 日志
 
 插件使用 IntelliJ 的 `Logger` 写入宿主 `idea.log`；发生连接失败、心跳超时或发送失败时会记录简短告警。也会在 IDEA 的标准日志目录下写入 `fast-idea-bridge/fast-idea-bridge-YYYY-MM-DD.log`，仅保留最近 3 天的日志。可通过 **Help | Show Log in Explorer** 打开日志目录。

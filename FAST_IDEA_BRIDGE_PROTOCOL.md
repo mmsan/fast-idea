@@ -87,6 +87,9 @@ WebSocket 连接建立后发送一次，用于识别这是 Fast Idea Bridge 插�
       "state",
       "getSelectedText",
       "getCurrentLineContent",
+      "home",
+      "shiftDown",
+      "shiftUp",
       "moveUpIfLastLine",
       "navigate",
       "select",
@@ -575,6 +578,19 @@ Search a file and position the editor at the first match. If `payload.path` is o
 
 On success, the response contains `startOffset`, `endOffset`, zero-based `line` and `column`, one-based `lineNumber` and `columnNumber`, plus the effective search options. A missing match returns `NOT_FOUND`; an invalid regular expression returns `INVALID_QUERY`.
 
+### 5.6a `command.deleteSelection`
+
+在当前编辑器中删除选区，但仅当选区文本与 `payload.expectedText` 完全一致时执行。该命令必须提供 `target.instanceId`，不要求项目身份；选区不匹配时仍成功返回 `data.handled: true`、`data.matched: false`、`data.deleted: false`，调用方不应再强制删除。
+
+```json
+{
+  "id": "delete-selection-1",
+  "type": "command.deleteSelection",
+  "target": {"instanceId": "bridge.hello 中的 instanceId"},
+  "payload": {"expectedText": "[[end]]"}
+}
+```
+
 ### 5.7 `command.requestFocus`
 
 请求 IDEA 当前编辑器所在窗口置前并获得焦点：
@@ -657,7 +673,11 @@ On success, the response contains `startOffset`, `endOffset`, zero-based `line` 
 
 成功响应的 `data` 包含 `interpreter`、`version`、`environmentType`（如 `venv`、`conda`、`system`）以及按请求名称返回的 `packages` 映射；未安装的包只返回 `installed: false`。
 
-### 5.11 `command.moveUpIfLastLine`
+### 5.11 `command.home`、`command.shiftDown`、`command.shiftUp`
+
+三者都要求 `target.instanceId`，并且只操作当前编辑器的原生光标和选择：`home` 清除选择并把每个光标移动到逻辑行首；`shiftDown` 和 `shiftUp` 按逻辑文档行扩选。`payload.count` 可选，默认 `1`。软换行不会改变 `home` 的目标位置，也不会消耗上下移动次数。
+
+### 5.12 `command.moveUpIfLastLine`
 
 仅当目标编辑器主光标位于最后一个有内容的行（其后仅有空白行）时，清除该光标的选择并上移一行，保持列位置。不是该行或文档只有一行时，命令成功返回 `data.handled: false`，调用方应继续使用原有后备逻辑；无编辑器时返回 `NO_EDITOR`。
 
@@ -901,9 +921,9 @@ f.ideaFocusBridge.openFile(
 ```js
 'src/main/java/example/App.java'
 'src\\main\\java\\example\\App.java'
-'D:/v/fast/src/main/java/example/App.java'
+'D:/v/fastjs/src/main/java/example/App.java'
 String.raw`D:\\v\\fast\\src\\main\\java\\example\\App.java`
-'file:///D:/v/fast/src/main/java/example/App.java'
+'file:///D:/v/fastjs/src/main/java/example/App.java'
 '\\\\server\\share\\project\\App.java'
 ```
 

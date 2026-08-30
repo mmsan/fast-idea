@@ -2,10 +2,8 @@
 
 ## Workspace topology
 
-- `D:\vs\fast` is the primary Windows application.
-- After the Windows application starts, it launches and uses `D:\v\fast`, a Node.js service.
-- The Node.js service calls the three editor plugin projects: `D:\v\fast-idea`, `D:\v\fast-visual-studio`, and `D:\v\fast-vscode`.
-- Changes involving the service or shared editor-bridge behavior must be evaluated across this application, service, and plugin chain.
+- This is the primary plugin project for shared rules. The Windows host is `D:\vs\fast`; the Node service is `D:\v\fastjs`.
+- Shared plugin behavior is defined below and is referenced by `D:\v\fast-visual-studio\AGENTS.md` and `D:\v\fast-vscode\AGENTS.md`.
 
 ## Stable identity and scope
 
@@ -18,120 +16,70 @@ Fast Idea Bridge is an IntelliJ Platform plugin that exchanges focus/editor stat
 - Read the release version from `pluginVersion` in `gradle.properties`; never hard-code it.
 - Use `com.intellij.modules.platform`; do not make the plugin Ultimate-only.
 
-Primary implementation and release surfaces:
+Key surfaces: `FocusBridgeService.java` (lifecycle/transport), `FocusSnapshotCollector.java` (focus/editor state), `BridgeCommands.java` (commands/path safety), `BridgeLog.java` (logs), settings/configuration files, protocol docs, and the build/publish/install scripts.
 
-- `FocusBridgeService.java`: lifecycle, WebSocket, retry, heartbeat, listeners, and sending.
-- `BridgeLog.java`: concise host and rolling plugin logs with three-day retention.
-- `FocusSnapshotCollector.java`: Swing focus and editor-state collection.
-- `BridgeCommands.java`: handshake identities, commands, path checks, and Windows HWNDs.
-- `FocusBridgeSettings.java` / `FocusBridgeConfigurable.java`: persisted settings and UI.
-- `FAST_IDEA_BRIDGE_PROTOCOL.md`, `README.md`: externally visible behavior and examples.
-- `build-plugin.cmd`, `publish-local-plugin.cmd`, `install-local-plugin.cmd`: package and local-repository workflow.
+## Shared editor-bridge rules
 
-## Runtime and protocol invariants
+- This section is authoritative for all three editor plugins. Keep sibling Agent files as references, not copies of these rules.
+- Do not duplicate method signatures or return descriptions when the source is cheap to read; inspect the implementation instead.
+- Use `ws://127.0.0.1:19900` by default; keep endpoint, bearer token, auto-connect, text sharing, and context length configurable. Preserve 1-second connect, 2-second ping, 6-second pong, and 200/500/1000/2000-ms reconnect timing; do not add application heartbeats.
+- Preserve message identity (`installationId`, `instanceId`, `connectionId`, project IDs/roots, and open projects). Mutating commands require the exact instance and matching project when supplied; reject unsafe paths.
+- Current-editor commands (caret, selection, or text actions without an explicit path) target only the exact `instanceId`; the plugin must operate on its own active editor and must not require a workspace/project. This includes temporarily opened files outside any workspace. Only path-based commands may require matching project identity or project-root validation.
+- Keep GUI `focus` separate from `activeEditor`. Efficiency is mandatory: avoid full-document reads, CodeModel/EnvDTE/COM, UI Automation, repeated RPCs, and simulated-key fallback on hot paths.
+- Prefer cached editor state, native snapshots, one focused request, and minimal UI-thread work; rich state collection is the usual cause of long current-line, selection, caret, or find calls.
+- For `find`, `NOT_FOUND` means the plugin handled the request; only errors, timeouts, unsupported commands, or unavailable targets fall back to simulated Ctrl+F.
+- `isEditorFocused` is true only when the code editor itself owns keyboard focus. Search boxes, terminals, explorers, sidebars, external windows, recent editors, and unknown states are false.
+- VS Code focus is checked by the Fast-side native host through `f.emit('isVsCodeEditorFocused', {})`; do not reintroduce a slower extension-side approximation.
+- Text sharing remains configurable; preserve structural ranges when disabled, redact passwords, and expose only visible top-level HWNDs in Windows handshakes.
+- Preserve backward compatibility and three-plugin alignment; update all adapters and protocol/docs for shared wire changes.
+- Before shared changes, read `D:\Obsidian\knowledge\projects\fast-idea\editor-bridge.md`, inspect all affected repositories, update protocol/docs, and run focused checks.
 
-- Default endpoint is `ws://127.0.0.1:19900`; host, port, path, bearer token, auto-connect, text sharing, and context length remain configurable.
-- Preserve the local connection policy: 1-second connect timeout, 2-second ping interval, 6-second pong timeout, and reconnect delays of 200 ms, 500 ms, 1 s, 2 s, then 2 s repeatedly. Avoid duplicate reconnect schedules. After reconnect, send `bridge.hello` and a complete `editor.state`. Node `ws` handles protocol Ping frames; do not add an application heartbeat.
+## IntelliJ-specific runtime rules
+
 - Never perform network I/O on the Swing EDT. Read Swing/editor state on the EDT and serialize/send it in the background.
-- Every message keeps `installationId`, `instanceId`, `connectionId`, deterministic `projectId`, `projectBasePath`, and all open `projects`.
-- Mutating commands (`command.navigate`, `command.select`, `command.requestFocus`, `command.copyResourcePath`) require `target.instanceId`; silently ignore other instances. If supplied, `target.projectId` or `target.projectBasePath` must select the exact project.
-- Resolve relative paths only inside open project roots. Reject traversal and absolute paths outside those roots.
-- `command.copyResourcePath` handles one or more selected files/directories in a focused Project View. Return all absolute paths in `data.paths`, retain `data.path` for a single selection, and otherwise return `data.handled: false`.
-- In explicit local development mode, poll the loopback plugin repository 10 seconds after startup and every 10 seconds thereafter. Download and prepare newer versions, then ask the user whether to restart; never restart IDEA without confirmation. Official-repository installs must not enable this updater.
-- Keep actual GUI `focus` separate from `activeEditor`. Prefer the editor/project from the focused component DataContext, then fall back to selected editors.
-- Preserve absolute and relative paths, project identity/root, caret positions, screen coordinates, primary/all selections, and bounded optional text context. Text sharing is configurable; redact password fields unconditionally.
-- On Windows, include process ID and visible top-level HWNDs only in `bridge.hello`, as unsigned decimal strings plus optional hex diagnostics. Preserve all windows and the initial active handle.
-- Keep the plugin dynamically unloadable: register listeners with the plugin `Disposable`, remove AWT listeners, stop executors, and close sockets. Do not add `require-restart="true"` without a real restart requirement.
-- Keep diagnostics concise: use IntelliJ `Logger` for warnings/errors and the plugin log for connection lifecycle summaries; never log source text, selections, tokens, or passwords. Remove plugin log files older than three days.
-- Only when the explicit `fast.idea.bridge.dev=true` system property is set, poll the configured loopback plugin repository 10 seconds after startup and every 60 seconds thereafter. The local installer writes this property plus `fast.idea.bridge.autoRestart=true` to `idea.properties`; both default to false so official-repository installations never use local polling or automatic restart. While the installed version remains lower, allow the same repository version to retry once per minute so transient publication/download failures recover. Use IntelliJ's `PluginDownloader` for download and compatibility checks, register the restart update, then save/restart IDEA through `ApplicationManagerEx` only when the explicit auto-restart property is true. Never poll or install from a non-loopback repository in this local updater.
+- Keep the plugin dynamically unloadable: register listeners with the plugin `Disposable`, remove AWT listeners, stop executors, and close sockets.
+- Use IntelliJ `Logger` for warnings/errors and concise three-day rolling plugin logs; never log source text, selections, tokens, or passwords.
+- The local updater is development-only: require `fast.idea.bridge.dev=true`, loopback URLs, and explicit `fast.idea.bridge.autoRestart=true` before restarting; never poll or install from a non-loopback repository.
+
+- Keep `command.copyResourcePath` scoped to the focused Project View; inspect its implementation for response fields.
 
 ## Plugin log locations (on demand)
 
 - Host log: IDEA standard `idea.log`, located via **Help | Show Log in Explorer**.
 - Plugin log: the newest `fast-idea-bridge\\fast-idea-bridge-YYYY-MM-DD.log` in the IDEA log directory.
 
-## Cross-project synchronization
+## Cross-project changes
 
-This is one of three implementations of the Fast editor bridge. Any shared event, command, identity, targeting rule, path-safety rule, text-sharing rule, reconnect behavior, or disposal change must be checked in the sibling repositories:
-
-- `D:\v\fast-visual-studio`
-- `D:\v\fast-vscode`
-- Fast-side adapters: `D:\v\fast\utils\socket-idea.js`, `socket-visual-studio.js`, and `socket-vscode.js`
-- Generic current-editor API: `D:\v\fast\utils\editor-bridge.js`; keep `f.ideaFocusBridge`, `f.visualStudioBridge`, and `f.vscodeBridge` available for explicit plugin targeting.
-
-When changing the handshake, fields, commands, or payloads, update the relevant Fast adapter, protocol documents, and README examples. Keep routing backward compatible and run the changed adapter checks, including:
+Use the shared rules above. For externally visible IntelliJ behavior, update protocol documents and README examples, then run the relevant adapter checks:
 
 ```powershell
-node --check D:\v\fast\utils\socket-browser.js
-node --check D:\v\fast\utils\socket-idea.js
+node --check D:\v\fastjs\utils\socket-browser.js
+node --check D:\v\fastjs\utils\socket-idea.js
 ```
 
-For shared changes, verify all three installable packages using the package procedure in each repository. A Java compile, JAR build, or IDE project build alone is not package verification.
+For a shared change, verify all three installable packages using each repository's package procedure. A Java compile, JAR build, or IDE project build alone is not package verification.
 
 ## Build and release package
 
-The installable artifact is the ZIP from Gradle `buildPlugin`, not `compileJava`, `jar`, or an IDE build. Use the repository wrapper:
+- Ordinary code changes use source-level checks only. Build the installable ZIP only when packaging, verification, publishing, installation, or release is requested.
+- The package entry point is `build-plugin.cmd`; the release verification entry point is `build-plugin.cmd -Verify`.
+- The expected artifact is `build\distributions\fast-idea-bridge-<pluginVersion>.zip`; keep the version from `gradle.properties`.
 
 ```powershell
 .\build-plugin.cmd
 ```
 
-For ordinary code changes, the user prefers source-level validation only. Do not create the installable ZIP unless the user explicitly asks to build a package, verify a package, publish, install, or release. Use the narrowest relevant compile or syntax check instead.
-
-For release-quality verification, use:
-
-```powershell
-.\build-plugin.cmd -Verify
-```
-
-Keep model-visible verification output concise. Prefer quiet or minimal Gradle output when the wrapper supports it; otherwise capture the wrapper's complete output in a local ignored or temporary log and show only a concise summary. Suppress routine `searchable-options` per-file progress and repeated known environment warnings from the model-visible excerpt, while retaining them in the full log. Always preserve the wrapper's exit code, unexpected warnings, actual Gradle or plugin-verifier failures, the results of `buildPlugin`, `verifyPluginProjectConfiguration`, and `verifyPluginStructure`, and the final artifact's absolute path and size. Do not replace the required wrapper with a direct Gradle command merely to reduce output.
-
-The wrapper always uses the standalone JDK 17 installed at `C:\Program Files\Eclipse Adoptium\jdk-17.0.20.8-hotspot`, never an IntelliJ IDEA JBR or an external `JAVA_HOME` value. The IntelliJ Platform SDK is resolved by Gradle from the configured platform dependency; it is not the installed IDEA application. The wrapper prefers `.gradle-dist\gradle-9.0.0` before the Gradle wrapper, runs `buildPlugin`, verifies the ZIP, and prints its absolute path and size. It also runs `verifyPluginProjectConfiguration` and `verifyPluginStructure` with `-Verify`. The expected artifact is:
-
-```text
-D:\v\fast-idea\build\distributions\fast-idea-bridge-<pluginVersion>.zip
-```
-
-Keep release verification across IntelliJ 2024.1, 2024.3, 2025.x, and a current/recommended IDE. Do not add an `until-build` without a concrete incompatibility.
-
-`build-plugin.cmd` is the normal package wrapper and writes to the standard `build` directory, while using the isolated `.intellijPlatform-build\gradle-cache` project cache by default. It therefore does not use the running IDEA project's `.gradle\9.0.0\fileHashes\fileHashes.lock`; `-ProjectCacheDirectory` is available for an explicit override. The project-local `.gradle` directory is disposable and may be absent; do not recreate or troubleshoot it unless an explicit override points there. In contrast, `.gradle-dist\gradle-9.0.0` is the local Gradle runtime used by the wrapper and must be kept for offline/reliable builds. For publishing while an IntelliJ IDEA process may have the project open, use `publish-local-plugin.cmd`; it automatically uses `.intellijPlatform-release\gradle-cache`, `.intellijPlatform-release\platform-cache`, `.intellijPlatform-release\sandbox`, and `.intellijPlatform-release\build`, so it does not share the running IDEA project's Gradle cache, IntelliJ Platform cache, sandbox, or build output. Its optional `-ProjectCacheDirectory`, `-IntelliJPlatformCacheDirectory`, `-SandboxContainer`, and `-BuildDirectory` parameters are for explicit CI or troubleshooting overrides.
-
 ## Local repository publishing and installation
 
-Local publication is an explicit user-authorized action, not a default verification step. After ordinary code changes, only build and verify the installable ZIP. Do not update the local Nginx repository, bump a release solely for publication, or run `publish-local-plugin.cmd` unless the user explicitly asks to publish locally, release a version, or uses equivalent wording. A request to modify, fix, build, test, or verify does not authorize publication.
-
-The existing local Nginx mapping is `D:\docker\www -> /www`, host port `8800` to container port `80`. Repository URLs are:
-
-```text
-http://127.0.0.1:8800/idea-plugins/updatePlugins.xml
-http://127.0.0.1:8800/idea-plugins/fast-idea-bridge-<version>.zip
-```
-
-HTTP on loopback is acceptable for local use; bind the Docker service to `127.0.0.1` when it must not be reachable from the LAN.
-
-Publish with:
-
-```powershell
-.\publish-local-plugin.cmd
-```
-
-The workflow must increment the patch version, restore it on failure, build the plugin, copy the ZIP to `D:\docker\www\idea-plugins`, verify the new ZIP URL returns HTTP 200 with non-empty `Content-Length`, atomically replace `updatePlugins.xml`, and verify both the metadata URL and its version/ZIP entry. If post-publish verification fails, restore the previous metadata and remove the newly published ZIP. Use `-NoVersionBump` only to retry a version already incremented by an interrupted/manual workflow; IDEA requires a higher repository version to detect an update.
-
-For a coordinated three-plugin release, use the executable one-command runbook in `D:\v\fast\AGENTS.md` under **Fast path: one-command coordinated local release**. Do not independently bump IDEA when the other two plugins are part of the same release.
-
-For first installation, close all IDEA processes and run:
+- Publishing/installing is explicit user-authorized work; ordinary changes do not update the local repository or bump versions.
+- Use `publish-local-plugin.cmd` for a local release. It must build, publish atomically, verify metadata/package availability, and roll back on failure; use `-NoVersionBump` only for a retry.
+- For a coordinated release, follow the one-command runbook in `D:\v\fastjs\AGENTS.md`; do not independently bump IDEA.
+- For first installation, close IDEA and run:
 
 ```powershell
 .\install-local-plugin.cmd
 ```
 
-The installer registers `idea.plugin.hosts`, downloads from Nginx, backs up the old plugin outside the active `plugins` directory, installs the archive, verifies the JAR version, and rolls back on failure. Write `idea.plugin.hosts` as an unquoted URL/property value; quotes become literal URI characters and cause `URISyntaxException`. Never leave a backup with the same plugin ID inside the active plugins directory. After the first installation, enable **Settings | Plugins | Update Plugins Automatically** once.
-
 ## Change discipline
 
-- Preserve settings when adding fields and provide defaults for older persisted state.
-- Keep protocol additions backward compatible where practical; increment the protocol version only for breaking changes.
-- Do not send full documents by default or log source text, selections, tokens, passwords, or bearer credentials.
-- Limit and validate inbound JSON messages; keep UI reads on the EDT and callbacks non-blocking.
-- Update protocol/docs after externally visible changes.
-- Do not overwrite a running IDEA plugin manually; close IDEA or use supported dynamic update mechanisms.
+- Preserve settings/defaults for older state. Do not overwrite a running IDEA plugin; use the supported update flow.

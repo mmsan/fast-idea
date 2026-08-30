@@ -5,6 +5,7 @@ import com.google.gson.JsonParser;
 import com.intellij.ide.DataManager;
 import com.intellij.openapi.actionSystem.IdeActions;
 import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.command.WriteCommandAction;
 import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.editor.LogicalPosition;
 import com.intellij.openapi.editor.ScrollType;
@@ -68,7 +69,7 @@ final class BridgeCommands {
         if (activeEditor instanceof Map<?, ?> editor) {
             payload.put("activeProject", editor.get("project"));
         }
-        payload.put("capabilities", List.of("state", "getInputable", "isEditorFocused", "getContext", "getObjectInfo", "getSelectedText", "getCurrentLineContent", "navigate", "select", "find", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages", "ctrlW", "ctrlShiftW", "shiftHome", "moveUpIfLastLine"));
+        payload.put("capabilities", List.of("state", "getInputable", "isEditorFocused", "getContext", "getObjectInfo", "getSelectedText", "getCurrentLineContent", "navigate", "select", "find", "deleteSelection", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages", "ctrlW", "ctrlShiftW", "shiftHome", "home", "shiftDown", "shiftUp", "moveUpIfLastLine"));
         return payload;
     }
 
@@ -158,6 +159,8 @@ final class BridgeCommands {
                         bridge.send("command.result", result(true, type, FocusSnapshotCollector.currentObjectInfo()), commandId));
                 case "command.getSelectedText" -> ApplicationManager.getApplication().invokeLater(() ->
                         selectedText(commandId, bridge));
+                case "command.deleteSelection" -> ApplicationManager.getApplication().invokeLater(() ->
+                        deleteSelection(payload, target, commandId, bridge));
                 case "command.getCurrentLineContent" -> ApplicationManager.getApplication().invokeLater(() ->
                         bridge.send("command.result", result(true, type, FocusSnapshotCollector.currentLineContent()), commandId));
                 case "command.isFullScreen" -> ApplicationManager.getApplication().invokeLater(() ->
@@ -171,6 +174,9 @@ final class BridgeCommands {
                 case "command.ctrlW" -> ApplicationManager.getApplication().invokeLater(() -> ctrlW(target, commandId, bridge));
                 case "command.ctrlShiftW" -> ApplicationManager.getApplication().invokeLater(() -> ctrlShiftW(target, commandId, bridge));
                 case "command.shiftHome" -> ApplicationManager.getApplication().invokeLater(() -> shiftHome(target, commandId, bridge));
+                case "command.home" -> ApplicationManager.getApplication().invokeLater(() -> home(target, commandId, bridge));
+                case "command.shiftDown" -> ApplicationManager.getApplication().invokeLater(() -> shiftDirection(target, payload, 1, commandId, bridge));
+                case "command.shiftUp" -> ApplicationManager.getApplication().invokeLater(() -> shiftDirection(target, payload, -1, commandId, bridge));
                 case "command.moveUpIfLastLine" -> ApplicationManager.getApplication().invokeLater(() -> moveUpIfLastLine(target, commandId, bridge));
                 case "command.fullScreen" -> ApplicationManager.getApplication().invokeLater(() -> fullScreen(target, commandId, bridge));
                 case "command.copyResourcePath" -> ApplicationManager.getApplication().invokeLater(() -> copyResourcePath(commandId, bridge));
@@ -192,6 +198,34 @@ final class BridgeCommands {
         }
 
         pollSelectedText(commandId, bridge, selectedText, 0);
+    }
+
+    private static void deleteSelection(JsonObject payload, JsonObject target, String id, FocusBridgeService bridge) {
+        String expectedText = string(payload, "expectedText", null);
+        if (expectedText == null) {
+            bridge.send("command.result", error("command.deleteSelection", "INVALID_MESSAGE", "payload.expectedText is required"), id);
+            return;
+        }
+
+        Project project = resolveProject(target);
+        Editor editor = project == null ? null : FileEditorManager.getInstance(project).getSelectedTextEditor();
+        if (editor == null) {
+            bridge.send("command.result", error("command.deleteSelection", "NO_EDITOR", "No active text editor"), id);
+            return;
+        }
+
+        var selection = editor.getSelectionModel();
+        if (!Objects.equals(selection.getSelectedText(), expectedText)) {
+            bridge.send("command.result", result(true, "command.deleteSelection",
+                    Map.of("handled", true, "matched", false, "deleted", false)), id);
+            return;
+        }
+
+        int start = selection.getSelectionStart();
+        int end = selection.getSelectionEnd();
+        WriteCommandAction.runWriteCommandAction(project, () -> editor.getDocument().deleteString(start, end));
+        bridge.send("command.result", result(true, "command.deleteSelection",
+                Map.of("handled", true, "matched", true, "deleted", true)), id);
     }
 
     private static void pollSelectedText(String commandId, FocusBridgeService bridge,
@@ -220,8 +254,9 @@ final class BridgeCommands {
                 || type.equals("command.find") || type.equals("command.requestFocus")
                 || type.equals("command.fullScreen")
                 || type.equals("command.copyResourcePath")
-                || type.equals("command.queryPythonPackages") || type.equals("command.ctrlW") || type.equals("command.ctrlShiftW")
-                || type.equals("command.shiftHome") || type.equals("command.moveUpIfLastLine");
+                || type.equals("command.queryPythonPackages") || type.equals("command.deleteSelection") || type.equals("command.ctrlW") || type.equals("command.ctrlShiftW")
+                || type.equals("command.shiftHome") || type.equals("command.home") || type.equals("command.shiftDown")
+                || type.equals("command.shiftUp") || type.equals("command.moveUpIfLastLine");
         if (mutating && (targetInstance == null || targetInstance.isBlank())) {
             throw new IllegalArgumentException("target.instanceId is required for this command");
         }
@@ -289,6 +324,44 @@ final class BridgeCommands {
             moved = true;
         }
         bridge.send("command.result", result(true, "command.shiftHome", Map.of("handled", moved)), id);
+    }
+
+    /** Moves every caret to its logical document-line start without selecting text. */
+    private static void home(JsonObject target, String id, FocusBridgeService bridge) {
+        Project project = resolveProject(target);
+        Editor editor = project == null ? null : FileEditorManager.getInstance(project).getSelectedTextEditor();
+        if (editor == null) {
+            bridge.send("command.result", error("command.home", "NO_EDITOR", "No active text editor"), id);
+            return;
+        }
+        var document = editor.getDocument();
+        for (var caret : editor.getCaretModel().getAllCarets()) {
+            caret.removeSelection();
+            caret.moveToOffset(document.getLineStartOffset(document.getLineNumber(caret.getOffset())));
+        }
+        bridge.send("command.result", result(true, "command.home", Map.of("handled", true)), id);
+    }
+
+    /** Extends every caret selection by logical document lines, ignoring soft wraps. */
+    private static void shiftDirection(JsonObject target, JsonObject payload, int direction, String id, FocusBridgeService bridge) {
+        Project project = resolveProject(target);
+        Editor editor = project == null ? null : FileEditorManager.getInstance(project).getSelectedTextEditor();
+        String command = direction > 0 ? "command.shiftDown" : "command.shiftUp";
+        if (editor == null) {
+            bridge.send("command.result", error(command, "NO_EDITOR", "No active text editor"), id);
+            return;
+        }
+        var document = editor.getDocument();
+        int count = Math.max(1, integer(payload, "count", 1));
+        for (var caret : editor.getCaretModel().getAllCarets()) {
+            int originalOffset = caret.getOffset();
+            int line = Math.max(0, Math.min(document.getLineCount() - 1, document.getLineNumber(originalOffset) + direction * count));
+            int targetOffset = Math.min(document.getLineEndOffset(line), document.getLineStartOffset(line) + caret.getLogicalPosition().column);
+            int anchor = caret.hasSelection() ? (originalOffset == caret.getSelectionStart() ? caret.getSelectionEnd() : caret.getSelectionStart()) : originalOffset;
+            caret.moveToOffset(targetOffset);
+            caret.setSelection(anchor, targetOffset);
+        }
+        bridge.send("command.result", result(true, command, Map.of("handled", true)), id);
     }
 
     private static void moveUpIfLastLine(JsonObject target, String id, FocusBridgeService bridge) {
