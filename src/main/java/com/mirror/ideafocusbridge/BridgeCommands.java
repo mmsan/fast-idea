@@ -69,7 +69,7 @@ final class BridgeCommands {
         if (activeEditor instanceof Map<?, ?> editor) {
             payload.put("activeProject", editor.get("project"));
         }
-        payload.put("capabilities", List.of("state", "getInputable", "isEditorFocused", "getContext", "getObjectInfo", "getSelectedText", "getCurrentLineContent", "navigate", "select", "find", "deleteSelection", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages", "ctrlW", "ctrlShiftW", "shiftHome", "home", "shiftDown", "shiftUp", "moveUpIfLastLine"));
+        payload.put("capabilities", List.of("state", "getInputable", "isEditorFocused", "getContext", "getObjectInfo", "getSelectedText", "getCurrentLineContent", "navigate", "select", "find", "deleteSelection", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages", "ctrlW", "ctrlShiftW", "shiftHome", "home", "end", "inputTop", "shiftDown", "shiftUp", "moveUpIfLastLine"));
         return payload;
     }
 
@@ -175,6 +175,8 @@ final class BridgeCommands {
                 case "command.ctrlShiftW" -> ApplicationManager.getApplication().invokeLater(() -> ctrlShiftW(target, commandId, bridge));
                 case "command.shiftHome" -> ApplicationManager.getApplication().invokeLater(() -> shiftHome(target, commandId, bridge));
                 case "command.home" -> ApplicationManager.getApplication().invokeLater(() -> home(target, commandId, bridge));
+                case "command.end" -> ApplicationManager.getApplication().invokeLater(() -> end(target, commandId, bridge));
+                case "command.inputTop" -> ApplicationManager.getApplication().invokeLater(() -> inputTop(payload, target, commandId, bridge));
                 case "command.shiftDown" -> ApplicationManager.getApplication().invokeLater(() -> shiftDirection(target, payload, 1, commandId, bridge));
                 case "command.shiftUp" -> ApplicationManager.getApplication().invokeLater(() -> shiftDirection(target, payload, -1, commandId, bridge));
                 case "command.moveUpIfLastLine" -> ApplicationManager.getApplication().invokeLater(() -> moveUpIfLastLine(target, commandId, bridge));
@@ -255,7 +257,7 @@ final class BridgeCommands {
                 || type.equals("command.fullScreen")
                 || type.equals("command.copyResourcePath")
                 || type.equals("command.queryPythonPackages") || type.equals("command.deleteSelection") || type.equals("command.ctrlW") || type.equals("command.ctrlShiftW")
-                || type.equals("command.shiftHome") || type.equals("command.home") || type.equals("command.shiftDown")
+                || type.equals("command.shiftHome") || type.equals("command.home") || type.equals("command.end") || type.equals("command.inputTop") || type.equals("command.shiftDown")
                 || type.equals("command.shiftUp") || type.equals("command.moveUpIfLastLine");
         if (mutating && (targetInstance == null || targetInstance.isBlank())) {
             throw new IllegalArgumentException("target.instanceId is required for this command");
@@ -340,6 +342,93 @@ final class BridgeCommands {
             caret.moveToOffset(document.getLineStartOffset(document.getLineNumber(caret.getOffset())));
         }
         bridge.send("command.result", result(true, "command.home", Map.of("handled", true)), id);
+    }
+
+    /** Moves every caret to its logical document-line end without selecting text. */
+    private static void end(JsonObject target, String id, FocusBridgeService bridge) {
+        Project project = resolveProject(target);
+        Editor editor = project == null ? null : FileEditorManager.getInstance(project).getSelectedTextEditor();
+        if (editor == null) {
+            bridge.send("command.result", error("command.end", "NO_EDITOR", "No active text editor"), id);
+            return;
+        }
+        var document = editor.getDocument();
+        for (var caret : editor.getCaretModel().getAllCarets()) {
+            int line = document.getLineNumber(caret.getOffset());
+            caret.removeSelection();
+            caret.moveToOffset(document.getLineEndOffset(line));
+        }
+        bridge.send("command.result", result(true, "command.end", Map.of("handled", true)), id);
+    }
+
+    /** Inserts text above the first non-comment line without touching the caret or selection. */
+    private static void inputTop(JsonObject payload, JsonObject target, String id, FocusBridgeService bridge) {
+        String code = string(payload, "code", null);
+        if (code == null || code.isEmpty()) {
+            bridge.send("command.result", error("command.inputTop", "INVALID_MESSAGE", "payload.code is required"), id);
+            return;
+        }
+        Project project = resolveProject(target);
+        Editor editor = project == null ? null : FileEditorManager.getInstance(project).getSelectedTextEditor();
+        if (editor == null) {
+            bridge.send("command.result", error("command.inputTop", "NO_EDITOR", "No active text editor"), id);
+            return;
+        }
+        var document = editor.getDocument();
+        String text = document.getText();
+        int offset = inputTopOffset(text, isPythonFile(editor));
+        String lineEnding = offset > 0 && text.charAt(offset - 1) != '\n' && text.charAt(offset - 1) != '\r' ? "\n" : "";
+        String inserted = lineEnding + code + "\n";
+        WriteCommandAction.runWriteCommandAction(project, () -> {
+            document.insertString(offset, inserted);
+        });
+        bridge.send("command.result", result(true, "command.inputTop", Map.of("handled", true)), id);
+    }
+
+    private static boolean isPythonFile(Editor editor) {
+        return editor.getVirtualFile() != null && "py".equalsIgnoreCase(editor.getVirtualFile().getExtension());
+    }
+
+    private static int inputTopOffset(String text, boolean python) {
+        int offset = 0;
+        boolean blockComment = false;
+        while (offset < text.length()) {
+            int lineEnd = text.indexOf('\n', offset);
+            int contentEnd = lineEnd < 0 ? text.length() : lineEnd;
+            String line = text.substring(offset, contentEnd);
+            if (line.endsWith("\r")) line = line.substring(0, line.length() - 1);
+            String trimmed = line.trim();
+            if (blockComment) {
+                int close = trimmed.indexOf("*/");
+                if (close < 0) {
+                    offset = lineEnd < 0 ? text.length() : lineEnd + 1;
+                    continue;
+                }
+                blockComment = false;
+                trimmed = trimmed.substring(close + 2).trim();
+                if (trimmed.isEmpty() || trimmed.startsWith("//") || (python && trimmed.startsWith("#"))) {
+                    offset = lineEnd < 0 ? text.length() : lineEnd + 1;
+                    continue;
+                }
+                return offset;
+            }
+            if (trimmed.startsWith("//") || (python && trimmed.startsWith("#"))) {
+                offset = lineEnd < 0 ? text.length() : lineEnd + 1;
+                continue;
+            }
+            if (trimmed.startsWith("/*")) {
+                int close = trimmed.indexOf("*/", 2);
+                if (close < 0) {
+                    blockComment = true;
+                } else if (!trimmed.substring(close + 2).trim().isEmpty()) {
+                    return offset;
+                }
+                offset = lineEnd < 0 ? text.length() : lineEnd + 1;
+                continue;
+            }
+            return offset;
+        }
+        return offset;
     }
 
     /** Extends every caret selection by logical document lines, ignoring soft wraps. */

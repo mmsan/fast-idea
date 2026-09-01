@@ -88,6 +88,8 @@ WebSocket 连接建立后发送一次，用于识别这是 Fast Idea Bridge 插�
       "getSelectedText",
       "getCurrentLineContent",
       "home",
+      "end",
+      "inputTop",
       "shiftDown",
       "shiftUp",
       "moveUpIfLastLine",
@@ -673,9 +675,19 @@ On success, the response contains `startOffset`, `endOffset`, zero-based `line` 
 
 成功响应的 `data` 包含 `interpreter`、`version`、`environmentType`（如 `venv`、`conda`、`system`）以及按请求名称返回的 `packages` 映射；未安装的包只返回 `installed: false`。
 
-### 5.11 `command.home`、`command.shiftDown`、`command.shiftUp`
+### 5.11 `command.home`、`command.end`、`command.inputTop`、`command.shiftDown`、`command.shiftUp`
 
-三者都要求 `target.instanceId`，并且只操作当前编辑器的原生光标和选择：`home` 清除选择并把每个光标移动到逻辑行首；`shiftDown` 和 `shiftUp` 按逻辑文档行扩选。`payload.count` 可选，默认 `1`。软换行不会改变 `home` 的目标位置，也不会消耗上下移动次数。
+这些命令都要求 `target.instanceId`。`home` 清除选择并把每个光标移动到逻辑行首；`end` 清除选择并把每个光标移动到逻辑行尾；`inputTop` 会跳过文件顶部连续的整行 `//`、Python `#` 和 `/* ... */` 注释，在第一个非注释行上方插入 `payload.code` 和换行，不主动处理光标或当前选区；`shiftDown` 和 `shiftUp` 按逻辑文档行扩选。`payload.count` 可选，默认 `1`。软换行不会改变 `home`、`end` 和 `inputTop` 的文档位置，也不会消耗上下移动次数。
+
+```json
+{
+  "id": "input-top-1",
+  "type": "command.inputTop",
+  "target": {
+    "instanceId": "bridge.hello 中的 instanceId"
+  }
+}
+```
 
 ### 5.12 `command.moveUpIfLastLine`
 
