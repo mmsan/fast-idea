@@ -69,7 +69,7 @@ final class BridgeCommands {
         if (activeEditor instanceof Map<?, ?> editor) {
             payload.put("activeProject", editor.get("project"));
         }
-        payload.put("capabilities", List.of("state", "getInputable", "isEditorFocused", "getContext", "getObjectInfo", "getSelectedText", "getCurrentLineContent", "navigate", "select", "find", "deleteSelection", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages", "ctrlW", "ctrlShiftW", "shiftHome", "home", "end", "inputTop", "shiftDown", "shiftUp", "moveUpIfLastLine"));
+        payload.put("capabilities", List.of("state", "getInputable", "isEditorFocused", "getContext", "getObjectInfo", "getSelectedText", "getCurrentLineContent", "navigate", "select", "find", "deleteSelection", "input", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages", "ctrlW", "ctrlShiftW", "shiftHome", "home", "end", "inputTop", "shiftDown", "shiftUp", "moveUpIfLastLine"));
         return payload;
     }
 
@@ -161,6 +161,8 @@ final class BridgeCommands {
                         selectedText(commandId, bridge));
                 case "command.deleteSelection" -> ApplicationManager.getApplication().invokeLater(() ->
                         deleteSelection(payload, target, commandId, bridge));
+                case "command.input" -> ApplicationManager.getApplication().invokeLater(() ->
+                        input(payload, target, commandId, bridge));
                 case "command.getCurrentLineContent" -> ApplicationManager.getApplication().invokeLater(() ->
                         bridge.send("command.result", result(true, type, FocusSnapshotCollector.currentLineContent()), commandId));
                 case "command.isFullScreen" -> ApplicationManager.getApplication().invokeLater(() ->
@@ -230,6 +232,31 @@ final class BridgeCommands {
                 Map.of("handled", true, "matched", true, "deleted", true)), id);
     }
 
+    private static void input(JsonObject payload, JsonObject target, String id, FocusBridgeService bridge) {
+        String text = string(payload, "text", null);
+        if (text == null) {
+            bridge.send("command.result", error("command.input", "INVALID_MESSAGE", "payload.text is required"), id);
+            return;
+        }
+
+        Project project = resolveProject(target);
+        Editor editor = project == null ? null : FileEditorManager.getInstance(project).getSelectedTextEditor();
+        if (editor == null) {
+            bridge.send("command.result", error("command.input", "NO_EDITOR", "No active text editor"), id);
+            return;
+        }
+
+        var caret = editor.getCaretModel().getPrimaryCaret();
+        int start = caret.getSelectionStart();
+        int end = caret.getSelectionEnd();
+        WriteCommandAction.runWriteCommandAction(project, () -> {
+            editor.getDocument().replaceString(start, end, text);
+            caret.removeSelection();
+            caret.moveToOffset(start + text.length());
+        });
+        bridge.send("command.result", result(true, "command.input", Map.of("handled", true)), id);
+    }
+
     private static void pollSelectedText(String commandId, FocusBridgeService bridge,
                                          String previousText, int elapsedMs) {
         int delayMs = Math.min(SELECTED_TEXT_POLL_INTERVAL_MS, SELECTED_TEXT_MAX_WAIT_MS - elapsedMs);
@@ -256,7 +283,7 @@ final class BridgeCommands {
                 || type.equals("command.find") || type.equals("command.requestFocus")
                 || type.equals("command.fullScreen")
                 || type.equals("command.copyResourcePath")
-                || type.equals("command.queryPythonPackages") || type.equals("command.deleteSelection") || type.equals("command.ctrlW") || type.equals("command.ctrlShiftW")
+                || type.equals("command.queryPythonPackages") || type.equals("command.deleteSelection") || type.equals("command.input") || type.equals("command.ctrlW") || type.equals("command.ctrlShiftW")
                 || type.equals("command.shiftHome") || type.equals("command.home") || type.equals("command.end") || type.equals("command.inputTop") || type.equals("command.shiftDown")
                 || type.equals("command.shiftUp") || type.equals("command.moveUpIfLastLine");
         if (mutating && (targetInstance == null || targetInstance.isBlank())) {

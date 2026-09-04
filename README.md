@@ -16,6 +16,8 @@ IntelliJ Platform plugin that connects IDE focus/editor state with the Fast appl
 
 `command.deleteSelection` deletes the current selection only when it exactly matches `payload.expectedText`; a mismatch succeeds without changing the document.
 
+`command.input` inserts `payload.text` at the primary caret, replacing the primary selection when present. An empty text value deletes that selection.
+
 ## 日志
 
 插件使用 IntelliJ 的 `Logger` 写入宿主 `idea.log`；发生连接失败、心跳超时或发送失败时会记录简短告警。也会在 IDEA 的标准日志目录下写入 `fast-idea-bridge/fast-idea-bridge-YYYY-MM-DD.log`，仅保留最近 3 天的日志。可通过 **Help | Show Log in Explorer** 打开日志目录。
@@ -78,7 +80,7 @@ The plugin sends `bridge.hello`, `focus.changed`, `editor.state`, and `editor.st
 
 ## Commands
 
-三个插件都支持通过 `command.getInputable`、`command.isEditorFocused`、`command.getContext`、`command.getObjectInfo` 和 `command.getSelectedText` 主动读取当前状态；Fast 端快捷调用为 `await f.editorBridge.getCurrentInputable()`、`await f.editorBridge.isEditorFocused()`、`await f.editorBridge.getCurrentContext()`、`await f.editorBridge.getCurrentObjectInfo()` 和 `await f.editorBridge.getCurrentSelectedText()`。`isEditorFocused` 仅在文本编辑器实际拥有键盘焦点时返回 `true`；`getContext` 返回 `singleQuote`、`doubleQuote`、`backtick`、`parentheses`、`braces` 或 `none`；没有可用编辑器时返回 `null`。
+三个插件都支持通过 `command.getInputable`、`command.isEditorFocused`、`command.getContext`、`command.getObjectInfo` 和 `command.getSelectedText` 主动读取当前状态；Fast 端快捷调用为 `await f.editorBridge.getCurrentInputable()`、`await f.editorBridge.isEditorFocused()`、`await f.editorBridge.getCurrentContext()`、`await f.editorBridge.getCurrentObjectInfo()` 和 `await f.editorBridge.getCurrentSelectedText()`。`f.editorBridge.input(text)` 会在当前主光标处输入并替换选区。`isEditorFocused` 仅在文本编辑器实际拥有键盘焦点时返回 `true`；`getContext` 返回 `singleQuote`、`doubleQuote`、`backtick`、`parentheses`、`braces` 或 `none`；没有可用编辑器时返回 `null`。
 
 全屏状态可以通过 `command.isFullScreen` 查询，返回 `data.fullScreen`。自动全屏会在握手后查询，确认未全屏才发送 `command.fullScreen`，切换后再次查询确认，并在窗口尚未就绪时重试。
 
