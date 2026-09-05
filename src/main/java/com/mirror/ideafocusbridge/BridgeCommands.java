@@ -711,6 +711,7 @@ final class BridgeCommands {
             if (editor == null) throw new IllegalStateException("File is not a text editor");
 
             activateEditorWindow(editor);
+            if ("command.navigate".equals(type)) editor.getSelectionModel().removeSelection();
 
             if ("command.navigate".equals(type) && (hasLine || hasColumn)) {
                 LogicalPosition current = editor.getCaretModel().getLogicalPosition();

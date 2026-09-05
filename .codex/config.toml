@@ -1,0 +1,8 @@
+[sandbox_workspace_write]
+writable_roots = [
+  'D:\vs\fast',
+  'D:\v\fastjs',
+  'D:\v\fastjs-runtime',
+  'D:\v\fast-visual-studio',
+  'D:\v\fast-vscode',
+]
