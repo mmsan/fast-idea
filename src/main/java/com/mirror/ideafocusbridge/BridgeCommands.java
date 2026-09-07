@@ -865,11 +865,25 @@ final class BridgeCommands {
             Path candidate = pathOf(requested);
             if (!candidate.isAbsolute()) candidate = base.resolve(candidate);
             candidate = candidate.toAbsolutePath().normalize();
-            if (!candidate.startsWith(base)) continue;
+            if (!candidate.startsWith(base) && !isLocalRuntimeDependency(base, candidate)) continue;
             VirtualFile file = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(candidate);
             if (file != null && !file.isDirectory()) return new Target(project, file);
         }
         throw new IllegalArgumentException("File was not found inside an open project");
+    }
+
+    private static boolean isLocalRuntimeDependency(Path base, Path candidate) {
+        try {
+            JsonObject packageJson = JsonParser.parseString(java.nio.file.Files.readString(base.resolve("package.json"))).getAsJsonObject();
+            JsonObject dependencies = packageJson.has("dependencies") && packageJson.get("dependencies").isJsonObject()
+                    ? packageJson.getAsJsonObject("dependencies") : null;
+            String runtime = dependencies == null ? null : string(dependencies, "fastjs-runtime", null);
+            if (runtime == null || !runtime.startsWith("file:")) return false;
+            Path runtimePath = base.resolve(runtime.substring(5)).toAbsolutePath().normalize();
+            return candidate.startsWith(runtimePath);
+        } catch (IOException | RuntimeException e) {
+            return false;
+        }
     }
 
     private static Path pathOf(String value) {
