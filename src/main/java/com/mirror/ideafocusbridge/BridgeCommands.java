@@ -3,7 +3,11 @@ package com.mirror.ideafocusbridge;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.intellij.ide.DataManager;
+import com.intellij.openapi.actionSystem.ActionManager;
+import com.intellij.openapi.actionSystem.ActionPlaces;
+import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.IdeActions;
+import com.intellij.openapi.actionSystem.ex.ActionUtil;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.command.WriteCommandAction;
 import com.intellij.openapi.editor.Editor;
@@ -69,7 +73,7 @@ final class BridgeCommands {
         if (activeEditor instanceof Map<?, ?> editor) {
             payload.put("activeProject", editor.get("project"));
         }
-        payload.put("capabilities", List.of("state", "getInputable", "isEditorFocused", "getContext", "getObjectInfo", "getSelectedText", "getCurrentLineContent", "navigate", "select", "find", "deleteSelection", "input", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages", "ctrlW", "ctrlShiftW", "shiftHome", "home", "end", "inputTop", "shiftDown", "shiftUp", "moveUpIfLastLine"));
+        payload.put("capabilities", List.of("state", "getInputable", "isEditorFocused", "getContext", "getObjectInfo", "getSelectedText", "getCurrentLineContent", "navigate", "select", "find", "deleteSelection", "input", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages", "ctrlW", "ctrlShiftW", "shiftHome", "home", "end", "inputTop", "shiftDown", "shiftUp", "moveUpIfLastLine", "executeIdeCommand"));
         return payload;
     }
 
@@ -182,6 +186,7 @@ final class BridgeCommands {
                 case "command.shiftDown" -> ApplicationManager.getApplication().invokeLater(() -> shiftDirection(target, payload, 1, commandId, bridge));
                 case "command.shiftUp" -> ApplicationManager.getApplication().invokeLater(() -> shiftDirection(target, payload, -1, commandId, bridge));
                 case "command.moveUpIfLastLine" -> ApplicationManager.getApplication().invokeLater(() -> moveUpIfLastLine(target, commandId, bridge));
+                case "command.executeIdeCommand" -> ApplicationManager.getApplication().invokeLater(() -> executeIdeCommand(payload, commandId, bridge));
                 case "command.fullScreen" -> ApplicationManager.getApplication().invokeLater(() -> fullScreen(target, commandId, bridge));
                 case "command.copyResourcePath" -> ApplicationManager.getApplication().invokeLater(() -> copyResourcePath(commandId, bridge));
                 case "command.queryPythonPackages" -> ApplicationManager.getApplication().invokeLater(() ->
@@ -285,7 +290,8 @@ final class BridgeCommands {
                 || type.equals("command.copyResourcePath")
                 || type.equals("command.queryPythonPackages") || type.equals("command.deleteSelection") || type.equals("command.input") || type.equals("command.ctrlW") || type.equals("command.ctrlShiftW")
                 || type.equals("command.shiftHome") || type.equals("command.home") || type.equals("command.end") || type.equals("command.inputTop") || type.equals("command.shiftDown")
-                || type.equals("command.shiftUp") || type.equals("command.moveUpIfLastLine");
+                || type.equals("command.shiftUp") || type.equals("command.moveUpIfLastLine")
+                || type.equals("command.executeIdeCommand");
         if (mutating && (targetInstance == null || targetInstance.isBlank())) {
             throw new IllegalArgumentException("target.instanceId is required for this command");
         }
@@ -302,6 +308,32 @@ final class BridgeCommands {
             }
         }
         bridge.send("command.result", error("command.requestFocus", "NO_EDITOR", "No active text editor"), id);
+    }
+
+    /** Executes an IntelliJ Platform action through the standard action system. */
+    private static void executeIdeCommand(JsonObject payload, String id, FocusBridgeService bridge) {
+        String actionId = string(payload, "commandId", null);
+        if (actionId == null || actionId.isBlank()) {
+            bridge.send("command.result", error("command.executeIdeCommand", "INVALID_COMMAND", "payload.commandId must be a non-empty string"), id);
+            return;
+        }
+        if (payload.has("args") && !payload.get("args").isJsonNull()
+                && (!payload.get("args").isJsonArray() || !payload.getAsJsonArray("args").isEmpty())) {
+            bridge.send("command.result", error("command.executeIdeCommand", "UNSUPPORTED_ARGUMENTS", "IntelliJ Platform actions do not accept generic arguments"), id);
+            return;
+        }
+        AnAction action = ActionManager.getInstance().getAction(actionId);
+        if (action == null) {
+            bridge.send("command.result", error("command.executeIdeCommand", "COMMAND_NOT_FOUND", "IDE action not found: " + actionId), id);
+            return;
+        }
+        try {
+            var focusOwner = KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner();
+            ActionUtil.invokeAction(action, DataManager.getInstance().getDataContext(focusOwner), ActionPlaces.UNKNOWN, null, null);
+            bridge.send("command.result", result(true, "command.executeIdeCommand", Map.of("handled", true)), id);
+        } catch (RuntimeException e) {
+            bridge.send("command.result", error("command.executeIdeCommand", "COMMAND_EXECUTION_FAILED", e.getMessage()), id);
+        }
     }
 
     private static void ctrlW(JsonObject target, String id, FocusBridgeService bridge) {

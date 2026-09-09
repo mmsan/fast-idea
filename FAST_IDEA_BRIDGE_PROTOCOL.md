@@ -719,6 +719,19 @@ On success, the response contains `startOffset`, `endOffset`, zero-based `line` 
 }
 ```
 
+### 5.13 `command.executeIdeCommand`
+
+要求 `target.instanceId`，通过 IntelliJ Platform Action System 执行已注册的 Action，不依赖快捷键。`payload.commandId` 是非空 Action ID。为保持三端协议统一，可省略 `payload.args` 或传空数组；JetBrains Action 没有通用位置参数接口，非空参数返回 `UNSUPPORTED_ARGUMENTS`。Action 不存在时返回 `COMMAND_NOT_FOUND`。
+
+```json
+{
+  "id": "execute-1",
+  "type": "command.executeIdeCommand",
+  "target": {"instanceId": "bridge.hello 中的 instanceId"},
+  "payload": {"commandId": "ReformatCode", "args": []}
+}
+```
+
 ## 六、命令响应
 
 插件使用 `type: "command.result"` 返回命令结果，并通过 `replyTo` 对应原命令的 `id`。

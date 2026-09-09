@@ -18,6 +18,8 @@ IntelliJ Platform plugin that connects IDE focus/editor state with the Fast appl
 
 `command.input` inserts `payload.text` at the primary caret, replacing the primary selection when present. An empty text value deletes that selection.
 
+`command.executeIdeCommand` uses the IntelliJ Platform Action System to execute `payload.commandId` without a key binding. Fast calls the current plugin uniformly with `await f.editorBridge.executeIdeCommand(actionId, ...args)`; JetBrains actions accept no generic arguments, so only an empty argument list is supported.
+
 ## 日志
 
 插件使用 IntelliJ 的 `Logger` 写入宿主 `idea.log`；发生连接失败、心跳超时或发送失败时会记录简短告警。也会在 IDEA 的标准日志目录下写入 `fast-idea-bridge/fast-idea-bridge-YYYY-MM-DD.log`，仅保留最近 3 天的日志。可通过 **Help | Show Log in Explorer** 打开日志目录。
