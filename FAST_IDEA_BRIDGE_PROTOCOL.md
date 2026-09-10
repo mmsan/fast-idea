@@ -691,6 +691,8 @@ On success, the response contains `startOffset`, `endOffset`, zero-based `line` 
 
 ### 5.11b `command.home`、`command.end`、`command.inputTop`、`command.shiftDown`、`command.shiftUp`
 
+`command.direction` 也要求 `target.instanceId`，通过 `payload.command` 原生执行 `left`、`right`、`shift left`、`shift right`、`ctrl shift left`、`ctrl shift right` 或 `shift end`；`payload.count` 可选，默认 `1`。
+
 这些命令都要求 `target.instanceId`。`home` 清除选择并把每个光标移动到逻辑行首；`end` 清除选择并把每个光标移动到逻辑行尾；`inputTop` 会跳过文件顶部连续的整行 `//`、Python `#` 和 `/* ... */` 注释，在第一个非注释行上方插入 `payload.code` 和换行，不主动处理光标或当前选区；`shiftDown` 和 `shiftUp` 按逻辑文档行扩选。`payload.count` 可选，默认 `1`。软换行不会改变 `home`、`end` 和 `inputTop` 的文档位置，也不会消耗上下移动次数。
 
 ```json

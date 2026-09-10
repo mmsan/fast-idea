@@ -73,7 +73,7 @@ final class BridgeCommands {
         if (activeEditor instanceof Map<?, ?> editor) {
             payload.put("activeProject", editor.get("project"));
         }
-        payload.put("capabilities", List.of("state", "getInputable", "isEditorFocused", "getContext", "getObjectInfo", "getSelectedText", "getCurrentLineContent", "navigate", "select", "find", "deleteSelection", "input", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages", "ctrlW", "ctrlShiftW", "shiftHome", "home", "end", "inputTop", "shiftDown", "shiftUp", "moveUpIfLastLine", "executeIdeCommand"));
+        payload.put("capabilities", List.of("state", "getInputable", "isEditorFocused", "getContext", "getObjectInfo", "getSelectedText", "getCurrentLineContent", "navigate", "select", "find", "deleteSelection", "input", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages", "ctrlW", "ctrlShiftW", "shiftHome", "home", "end", "direction", "inputTop", "shiftDown", "shiftUp", "moveUpIfLastLine", "executeIdeCommand"));
         return payload;
     }
 
@@ -182,6 +182,7 @@ final class BridgeCommands {
                 case "command.shiftHome" -> ApplicationManager.getApplication().invokeLater(() -> shiftHome(target, commandId, bridge));
                 case "command.home" -> ApplicationManager.getApplication().invokeLater(() -> home(target, commandId, bridge));
                 case "command.end" -> ApplicationManager.getApplication().invokeLater(() -> end(target, commandId, bridge));
+                case "command.direction" -> ApplicationManager.getApplication().invokeLater(() -> direction(target, payload, commandId, bridge));
                 case "command.inputTop" -> ApplicationManager.getApplication().invokeLater(() -> inputTop(payload, target, commandId, bridge));
                 case "command.shiftDown" -> ApplicationManager.getApplication().invokeLater(() -> shiftDirection(target, payload, 1, commandId, bridge));
                 case "command.shiftUp" -> ApplicationManager.getApplication().invokeLater(() -> shiftDirection(target, payload, -1, commandId, bridge));
@@ -289,7 +290,7 @@ final class BridgeCommands {
                 || type.equals("command.fullScreen")
                 || type.equals("command.copyResourcePath")
                 || type.equals("command.queryPythonPackages") || type.equals("command.deleteSelection") || type.equals("command.input") || type.equals("command.ctrlW") || type.equals("command.ctrlShiftW")
-                || type.equals("command.shiftHome") || type.equals("command.home") || type.equals("command.end") || type.equals("command.inputTop") || type.equals("command.shiftDown")
+                || type.equals("command.shiftHome") || type.equals("command.home") || type.equals("command.end") || type.equals("command.direction") || type.equals("command.inputTop") || type.equals("command.shiftDown")
                 || type.equals("command.shiftUp") || type.equals("command.moveUpIfLastLine")
                 || type.equals("command.executeIdeCommand");
         if (mutating && (targetInstance == null || targetInstance.isBlank())) {
@@ -418,6 +419,36 @@ final class BridgeCommands {
             caret.moveToOffset(document.getLineEndOffset(line));
         }
         bridge.send("command.result", result(true, "command.end", Map.of("handled", true)), id);
+    }
+
+    /** Executes a supported native horizontal caret or selection movement. */
+    private static void direction(JsonObject target, JsonObject payload, String id, FocusBridgeService bridge) {
+        Project project = resolveProject(target);
+        Editor editor = project == null ? null : FileEditorManager.getInstance(project).getSelectedTextEditor();
+        if (editor == null) {
+            bridge.send("command.result", error("command.direction", "NO_EDITOR", "No active text editor"), id);
+            return;
+        }
+        String command = string(payload, "command", "");
+        String action = switch (command) {
+            case "left" -> IdeActions.ACTION_EDITOR_MOVE_CARET_LEFT;
+            case "right" -> IdeActions.ACTION_EDITOR_MOVE_CARET_RIGHT;
+            case "shift left" -> IdeActions.ACTION_EDITOR_MOVE_CARET_LEFT_WITH_SELECTION;
+            case "shift right" -> IdeActions.ACTION_EDITOR_MOVE_CARET_RIGHT_WITH_SELECTION;
+            case "ctrl shift left" -> "EditorPreviousWordWithSelection";
+            case "ctrl shift right" -> "EditorNextWordWithSelection";
+            case "shift end" -> "EditorLineEndWithSelection";
+            default -> null;
+        };
+        if (action == null) {
+            bridge.send("command.result", error("command.direction", "INVALID_MESSAGE", "Unsupported direction command"), id);
+            return;
+        }
+        int count = Math.max(1, integer(payload, "count", 1));
+        EditorActionHandler handler = EditorActionManager.getInstance().getActionHandler(action);
+        var context = DataManager.getInstance().getDataContext(editor.getContentComponent());
+        for (int i = 0; i < count; i++) handler.execute(editor, editor.getCaretModel().getPrimaryCaret(), context);
+        bridge.send("command.result", result(true, "command.direction", Map.of("handled", true)), id);
     }
 
     /** Inserts text above the first non-comment line without touching the caret or selection. */

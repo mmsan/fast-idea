@@ -12,6 +12,8 @@ IntelliJ Platform plugin that connects IDE focus/editor state with the Fast appl
 
 `command.getSelectedText` returns a changed selection immediately. If it matches the previous active read, the plugin polls every 30 ms, returns as soon as the value changes, and otherwise returns the latest value after 200 ms.
 
+`command.direction` natively performs `left`, `right`, `shift left`, `shift right`, `ctrl shift left`, `ctrl shift right`, or `shift end`; optional `payload.count` defaults to `1`.
+
 `command.home` clears selections and moves carets to logical line starts; `command.end` clears selections and moves carets to logical line ends; `command.inputTop` skips consecutive full-line `//`, Python `#`, and `/* ... */` comments at the document top, then inserts `payload.code` plus a newline above the first non-comment line without actively touching the caret or selection; `command.shiftDown` and `command.shiftUp` extend selections by logical document lines (`payload.count` defaults to `1`). Soft wrapping does not affect `home`, `end`, or `inputTop` document positions or consume movement steps.
 
 `command.deleteSelection` deletes the current selection only when it exactly matches `payload.expectedText`; a mismatch succeeds without changing the document.
