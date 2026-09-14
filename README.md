@@ -45,7 +45,7 @@ Every outgoing message contains a top-level `source` object:
 
 This prevents multiple IDE processes and multiple projects from overwriting each other on the Node.js side. Store sockets by `source.instanceId`, not in one global socket variable.
 
-On Windows, the initial `bridge.hello` additionally contains the process ID and native top-level window handles. Handles are sent only during the handshake, not with every state event:
+On Windows, the initial `bridge.hello` additionally contains the process ID and native top-level window handles. Main project windows include their project identity so the service can resolve the foreground project by HWND. Handles are sent only during the handshake, not with every state event:
 
 ```json
 {
@@ -54,7 +54,12 @@ On Windows, the initial `bridge.hello` additionally contains the process ID and 
     "activeWindowHandle": "132844",
     "windows": [
       {
-        "handle": "132844"
+        "handle": "132844",
+        "project": {
+          "projectId": "...",
+          "name": "idea-input",
+          "basePath": "D:/v/idea-input"
+        }
       }
     ]
   }

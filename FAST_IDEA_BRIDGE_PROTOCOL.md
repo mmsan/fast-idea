@@ -127,11 +127,16 @@ WebSocket 连接建立后发送一次，用于识别这是 Fast Idea Bridge 插�
 
 ```json
 {
-  "handle": "132844"
+  "handle": "132844",
+  "project": {
+    "projectId": "项目 UUID",
+    "name": "idea-input",
+    "basePath": "D:/v/idea-input"
+  }
 }
 ```
 
-句柄使用字符串是为了避免 JavaScript 的整数精度问题。
+句柄使用字符串是为了避免 JavaScript 的整数精度问题。IDEA 主项目窗口还会携带 `project`，供服务端按当前前台 HWND 精确关联项目；对话框等不直接属于项目的窗口可以省略该字段。
 
 ### 3.2 `focus.changed`
 

@@ -94,6 +94,12 @@ final class BridgeCommands {
                 String decimal = Long.toUnsignedString(handle);
                 Map<String, Object> item = new LinkedHashMap<>();
                 item.put("handle", decimal);
+                for (Project project : ProjectManager.getInstance().getOpenProjects()) {
+                    if (WindowManager.getInstance().getFrame(project) == window) {
+                        item.put("project", projectIdentity(project));
+                        break;
+                    }
+                }
                 windows.add(item);
                 if (window == active) activeHandle = decimal;
             } catch (RuntimeException ignored) { }
