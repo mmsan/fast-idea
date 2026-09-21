@@ -4,7 +4,7 @@ IntelliJ Platform plugin that connects IDE focus/editor state with the Fast appl
 
 ## Defaults
 
-- URL: `ws://127.0.0.1:19900`
+- URL: `ws://127.0.0.1:9072`
 - Settings: **Settings | Tools | Fast Idea Bridge**
 - Minimum platform: IntelliJ Platform 2024.1 (`241`)
 - The plugin uses only the common Platform module, so it can run in IDEA and other JetBrains IDEs.

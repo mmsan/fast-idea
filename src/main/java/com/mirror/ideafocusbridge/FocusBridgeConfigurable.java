@@ -47,7 +47,7 @@ public final class FocusBridgeConfigurable implements Configurable {
     @Override public boolean isModified() {
         var s = FocusBridgeSettings.getInstance().data();
         return !host.getText().trim().equals(s.host)
-                || parse(port.getText(), 19900) != s.port
+                || parse(port.getText(), 9072) != s.port
                 || !path.getText().trim().equals(s.path)
                 || !new String(token.getPassword()).equals(s.token)
                 || autoConnect.isSelected() != s.autoConnect
@@ -58,7 +58,7 @@ public final class FocusBridgeConfigurable implements Configurable {
     @Override public void apply() {
         var s = FocusBridgeSettings.getInstance().data();
         s.host = host.getText().trim();
-        s.port = Math.max(1, Math.min(65535, parse(port.getText(), 19900)));
+        s.port = Math.max(1, Math.min(65535, parse(port.getText(), 9072)));
         s.path = path.getText().trim();
         s.token = new String(token.getPassword());
         s.autoConnect = autoConnect.isSelected();

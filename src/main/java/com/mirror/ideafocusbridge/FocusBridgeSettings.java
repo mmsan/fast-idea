@@ -15,7 +15,7 @@ import java.util.UUID;
 public final class FocusBridgeSettings implements PersistentStateComponent<FocusBridgeSettings.Data> {
     public static final class Data {
         public String host = "127.0.0.1";
-        public int port = 19900;
+        public int port = 9072;
         public String path = "";
         public String token = "";
         public boolean autoConnect = true;

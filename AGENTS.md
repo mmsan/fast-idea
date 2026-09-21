@@ -17,7 +17,7 @@
 
 This section is authoritative; sibling `AGENTS.md` files should reference it, not copy it.
 
-- Default endpoint: `ws://127.0.0.1:19900`. Keep endpoint, bearer token, auto-connect, text sharing, and context length configurable. Preserve 1-second connect, 2-second ping, 6-second pong, and 200/500/1000/2000-ms reconnect timing; do not add application heartbeats.
+- Default endpoint: `ws://127.0.0.1:9072`. Keep endpoint, bearer token, auto-connect, text sharing, and context length configurable. Preserve 1-second connect, 2-second ping, 6-second pong, and 200/500/1000/2000-ms reconnect timing; do not add application heartbeats.
 - Preserve identity (`installationId`, `instanceId`, `connectionId`, project IDs/roots, and open projects). Mutating commands require the exact instance and matching project when supplied; reject unsafe paths.
 - Current-editor commands without an explicit path target only the exact `instanceId` and the plugin's active editor, including temporarily opened files. Only path-based commands may require project identity or root validation.
 - Keep hot paths lightweight: prefer cached/native state and focused requests; avoid full-document reads, repeated RPCs, CodeModel/EnvDTE/COM, UI Automation, simulated-key fallback, and unnecessary UI-thread work.
