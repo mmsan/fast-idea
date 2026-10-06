@@ -97,6 +97,8 @@ WebSocket 连接建立后发送一次，用于识别这是 Fast Idea Bridge 插�
       "select",
       "find",
       "input",
+      "beginInputUndo",
+      "undoInput",
       "requestFocus",
       "fullScreen",
       "copyResourcePath",
@@ -739,6 +741,24 @@ On success, the response contains `startOffset`, `endOffset`, zero-based `line` 
 }
 ```
 
+### 5.14 `command.beginInputUndo` / `command.undoInput` (optional, IDEA only)
+
+Call only when the handshake advertises both `beginInputUndo` and `undoInput`. Both commands require an exact `target.instanceId`; supplied `projectId` or `projectBasePath` must match the focused editor. Other editor plugins do not advertise these capabilities.
+
+`command.beginInputUndo` takes no payload and succeeds with `data: {"token": "UUID"}`. Call it before Fast changes the caret, selection, or text for a Shift+Space Input invocation. The plugin keeps only the latest checkpoint, expires it after 30 seconds, and weakly references its editor, document, and native file editor. It stores the native undo boundary, document modification stamp, carets/selections, and scroll offsets without reading or storing document text.
+
+`command.undoInput` takes `payload: {"token": "UUID"}` and succeeds with `data: {"handled": true}` only after native undo reaches both the saved history boundary and modification stamp, then restores the saved carets/selections and scroll offsets. Consume the token and drain pending Input/tab work before sending this command. Do not send an extra physical Right after success. A matched token is one-shot even when the command fails; wrong/expired tokens, changed editors/documents, and lost focus are rejected before undo.
+
+Native undo and recovery redo each allow at most 100 calls. The plugin checks the next timestamp and confirmation requirement before every native call, never deliberately requests an undo at or before the captured boundary, and allows state-only calls that do not advance history. Transparent/grouped or rebased native changes can make the exact checkpoint unreachable. A failed undo attempts bounded native redo to the request's original undo/redo boundaries, modification stamp, carets/selections, and scroll offsets, then returns a structured error. `INPUT_UNDO_RECOVERY_FAILED` means the native history could not restore that state; no success or alternative undo is reported. Native undo APIs do not expose the inner transparent-group steps, so a single call that traverses the boundary is treated as a failure and recovered with redo.
+
+```json
+{"id":"input-checkpoint-1","type":"command.beginInputUndo","target":{"instanceId":"INSTANCE_FROM_BRIDGE_HELLO"}}
+```
+
+```json
+{"id":"input-undo-1","type":"command.undoInput","target":{"instanceId":"INSTANCE_FROM_BRIDGE_HELLO"},"payload":{"token":"TOKEN_FROM_BEGIN_INPUT_UNDO"}}
+```
+
 ## 六、命令响应
 
 插件使用 `type: "command.result"` 返回命令结果，并通过 `replyTo` 对应原命令的 `id`。
@@ -789,6 +809,11 @@ On success, the response contains `startOffset`, `endOffset`, zero-based `line` 
 | `NOT_FOUND` | 未找到匹配文本。 |
 | `INVALID_QUERY` | 正则表达式无效。 |
 | `NO_EDITOR` | `command.requestFocus` 执行时没有可用编辑器。 |
+| `INVALID_TOKEN` | Input undo token is missing, malformed, replaced, or already consumed. |
+| `INPUT_UNDO_EXPIRED` | The latest Input checkpoint is older than 30 seconds. |
+| `EDITOR_CHANGED` | The captured editor/document is unavailable or no longer focused, or the project does not match. |
+| `INPUT_UNDO_FAILED` | Native Input checkpoint capture/undo failed; a failed undo reports whether request state was restored. |
+| `INPUT_UNDO_RECOVERY_FAILED` | Native undo failed and bounded redo could not restore the request state. |
 
 如果命令带有不属于当前 IDEA 进程的 `target.instanceId`，插件会直接忽略，不返回响应。
 

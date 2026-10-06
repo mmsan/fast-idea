@@ -5,11 +5,15 @@ import com.google.gson.JsonParser;
 import com.intellij.ide.DataManager;
 import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.ActionPlaces;
+import com.intellij.openapi.actionSystem.CommonDataKeys;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.IdeActions;
 import com.intellij.openapi.actionSystem.ex.ActionUtil;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.command.WriteCommandAction;
+import com.intellij.openapi.command.undo.UndoManager;
+import com.intellij.openapi.editor.CaretState;
+import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.editor.LogicalPosition;
 import com.intellij.openapi.editor.ScrollType;
@@ -18,6 +22,8 @@ import com.intellij.openapi.editor.actionSystem.EditorActionManager;
 import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.fileEditor.OpenFileDescriptor;
+import com.intellij.openapi.fileEditor.TextEditor;
+import com.intellij.openapi.fileEditor.impl.text.TextEditorProvider;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.roots.ProjectRootManager;
@@ -37,6 +43,7 @@ import java.awt.Frame;
 import java.awt.KeyboardFocusManager;
 import java.awt.Window;
 import java.io.IOException;
+import java.lang.ref.WeakReference;
 import java.net.URI;
 import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
@@ -49,7 +56,10 @@ import java.util.concurrent.TimeUnit;
 final class BridgeCommands {
     private static final int SELECTED_TEXT_POLL_INTERVAL_MS = 30;
     private static final int SELECTED_TEXT_MAX_WAIT_MS = 200;
+    private static final long INPUT_UNDO_LIFETIME_NANOS = TimeUnit.SECONDS.toNanos(30);
+    private static final int INPUT_UNDO_MAX_CALLS = 100;
     private static String lastSelectedText;
+    private static InputUndoCheckpoint inputUndoCheckpoint;
 
     private BridgeCommands() {}
 
@@ -73,7 +83,7 @@ final class BridgeCommands {
         if (activeEditor instanceof Map<?, ?> editor) {
             payload.put("activeProject", editor.get("project"));
         }
-        payload.put("capabilities", List.of("state", "getInputable", "isEditorFocused", "getContext", "getObjectInfo", "getSelectedText", "getCurrentLineContent", "navigate", "select", "find", "deleteSelection", "input", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages", "ctrlW", "ctrlShiftW", "shiftHome", "home", "end", "direction", "inputTop", "shiftDown", "shiftUp", "moveUpIfLastLine", "executeIdeCommand"));
+        payload.put("capabilities", List.of("state", "getInputable", "isEditorFocused", "getContext", "getObjectInfo", "getSelectedText", "getCurrentLineContent", "navigate", "select", "find", "deleteSelection", "input", "beginInputUndo", "undoInput", "requestFocus", "fullScreen", "isFullScreen", "listProjects", "copyResourcePath", "pythonPackages", "ctrlW", "ctrlShiftW", "shiftHome", "home", "end", "direction", "inputTop", "shiftDown", "shiftUp", "moveUpIfLastLine", "executeIdeCommand"));
         return payload;
     }
 
@@ -173,6 +183,9 @@ final class BridgeCommands {
                         deleteSelection(payload, target, commandId, bridge));
                 case "command.input" -> ApplicationManager.getApplication().invokeLater(() ->
                         input(payload, target, commandId, bridge));
+                case "command.beginInputUndo", "command.undoInput" ->
+                        ApplicationManager.getApplication().invokeLater(() ->
+                                inputUndo(type, payload, target, commandId, bridge));
                 case "command.getCurrentLineContent" -> ApplicationManager.getApplication().invokeLater(() ->
                         bridge.send("command.result", result(true, type, FocusSnapshotCollector.currentLineContent()), commandId));
                 case "command.isFullScreen" -> ApplicationManager.getApplication().invokeLater(() ->
@@ -269,6 +282,142 @@ final class BridgeCommands {
         bridge.send("command.result", result(true, "command.input", Map.of("handled", true)), id);
     }
 
+    /** Handles native Input checkpoints on the EDT and sends the result in the background. */
+    private static void inputUndo(String type, JsonObject payload, JsonObject target,
+                                  String id, FocusBridgeService bridge) {
+        Map<String, Object> response;
+        try {
+            response = "command.beginInputUndo".equals(type) ? beginInputUndo(target) : undoInput(payload, target);
+        } catch (RuntimeException e) {
+            response = error(type, "INPUT_UNDO_FAILED", "Unable to capture or apply native Input undo");
+        }
+        Map<String, Object> message = response;
+        bridge.runBackground(() -> bridge.send("command.result", message, id));
+    }
+
+    /** Captures the latest focused editor's native history boundary without reading its text. */
+    private static Map<String, Object> beginInputUndo(JsonObject target) {
+        inputUndoCheckpoint = null;
+        Editor editor = focusedInputUndoEditor(target);
+        if (editor == null) return error("command.beginInputUndo", "NO_EDITOR", "No matching focused text editor");
+        TextEditor fileEditor = TextEditorProvider.getInstance().getTextEditor(editor);
+        if (!fileEditor.isValid()) return error("command.beginInputUndo", "NO_EDITOR", "Text editor is unavailable");
+
+        UndoManager manager = UndoManager.getInstance(editor.getProject());
+        InputUndoState state = captureInputUndoState(editor, fileEditor, manager);
+        String token = UUID.randomUUID().toString();
+        inputUndoCheckpoint = new InputUndoCheckpoint(token, System.nanoTime(), new WeakReference<>(editor),
+                new WeakReference<>(editor.getDocument()), new WeakReference<>(fileEditor), state);
+        return result(true, "command.beginInputUndo", Map.of("token", token));
+    }
+
+    /** Consumes a checkpoint and rolls back later native edits, recovering the request state on failure. */
+    private static Map<String, Object> undoInput(JsonObject payload, JsonObject target) {
+        var value = payload.get("token");
+        if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()) {
+            return error("command.undoInput", "INVALID_TOKEN", "payload.token must be a non-empty UUID");
+        }
+        String token = value.getAsString();
+        try {
+            if (!UUID.fromString(token).toString().equalsIgnoreCase(token)) throw new IllegalArgumentException();
+        } catch (IllegalArgumentException e) {
+            return error("command.undoInput", "INVALID_TOKEN", "payload.token must be a non-empty UUID");
+        }
+        InputUndoCheckpoint checkpoint = inputUndoCheckpoint;
+        if (checkpoint == null || !checkpoint.token.equalsIgnoreCase(token)) {
+            return error("command.undoInput", "INVALID_TOKEN", "Input undo checkpoint is unavailable");
+        }
+        inputUndoCheckpoint = null;
+        if (System.nanoTime() - checkpoint.createdNanos >= INPUT_UNDO_LIFETIME_NANOS) {
+            return error("command.undoInput", "INPUT_UNDO_EXPIRED", "Input undo checkpoint has expired");
+        }
+        Editor editor = focusedInputUndoEditor(target);
+        TextEditor fileEditor = checkpoint.fileEditor.get();
+        if (editor == null || editor != checkpoint.editor.get() || editor.getDocument() != checkpoint.document.get()
+                || fileEditor == null || !fileEditor.isValid() || fileEditor.getEditor() != editor) {
+            return error("command.undoInput", "EDITOR_CHANGED", "The captured text editor must still be focused");
+        }
+
+        UndoManager manager = UndoManager.getInstance(editor.getProject());
+        InputUndoState requestState = captureInputUndoState(editor, fileEditor, manager);
+        try {
+            for (int calls = 0; ; calls++) {
+                long nextUndo = manager.getNextUndoNanoTime(fileEditor);
+                if (nextUndo == checkpoint.state.undoNanoTime
+                        && editor.getDocument().getModificationStamp() == checkpoint.state.modificationStamp) {
+                    restoreInputEditorState(editor, checkpoint.state);
+                    return result(true, "command.undoInput", Map.of("handled", true));
+                }
+                if (calls >= INPUT_UNDO_MAX_CALLS || nextUndo == -1
+                        || checkpoint.state.undoNanoTime != -1 && nextUndo <= checkpoint.state.undoNanoTime
+                        || !manager.isUndoAvailable(fileEditor) || manager.isNextUndoAskConfirmation(fileEditor)) {
+                    throw new IllegalStateException("Native Input checkpoint is unreachable");
+                }
+                manager.undo(fileEditor);
+            }
+        } catch (RuntimeException e) {
+            boolean restored;
+            try {
+                restored = recoverInputUndo(editor, fileEditor, manager, requestState);
+            } catch (RuntimeException recoveryFailure) {
+                restored = false;
+            }
+            return error("command.undoInput", restored ? "INPUT_UNDO_FAILED" : "INPUT_UNDO_RECOVERY_FAILED",
+                    restored ? "Native undo could not reach the checkpoint; request state restored"
+                            : "Native undo failed and the request state could not be restored");
+        }
+    }
+
+    /** Resolves only a writable editor that owns keyboard focus and matches any supplied project identity. */
+    private static Editor focusedInputUndoEditor(JsonObject target) {
+        var focus = KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner();
+        if (focus == null) return null;
+        Editor editor = CommonDataKeys.EDITOR.getData(DataManager.getInstance().getDataContext(focus));
+        if (editor == null || editor.isDisposed() || editor.isViewer() || !editor.getDocument().isWritable()
+                || !SwingUtilities.isDescendingFrom(focus, editor.getContentComponent())) return null;
+        Project project = editor.getProject();
+        if (project == null || project.isDisposed()) return null;
+        String basePath = Objects.toString(project.getBasePath(), "");
+        String requestedProjectId = string(target, "projectId", null);
+        String requestedBasePath = string(target, "projectBasePath", null);
+        if (requestedProjectId != null && !requestedProjectId.equals(projectId(basePath))) return null;
+        if (requestedBasePath != null && !pathOf(requestedBasePath).normalize().equals(pathOf(basePath).normalize())) return null;
+        return editor;
+    }
+
+    /** Flushes the native command merger and records history, carets, selections, and scroll offsets. */
+    private static InputUndoState captureInputUndoState(Editor editor, TextEditor fileEditor, UndoManager manager) {
+        long undoNanoTime = manager.getNextUndoNanoTime(fileEditor);
+        return new InputUndoState(editor.getDocument().getModificationStamp(), undoNanoTime,
+                manager.getNextRedoNanoTime(fileEditor), List.copyOf(editor.getCaretModel().getCaretsAndSelections()),
+                editor.getScrollingModel().getHorizontalScrollOffset(), editor.getScrollingModel().getVerticalScrollOffset());
+    }
+
+    /** Restores native carets and selections directly, without an extra physical caret movement. */
+    private static void restoreInputEditorState(Editor editor, InputUndoState state) {
+        editor.getCaretModel().setCaretsAndSelections(state.carets);
+        editor.getScrollingModel().scrollHorizontally(state.horizontalScroll);
+        editor.getScrollingModel().scrollVertically(state.verticalScroll);
+    }
+
+    /** Redoes only history undone by this request, with bounded calls and no requested confirmations. */
+    private static boolean recoverInputUndo(Editor editor, TextEditor fileEditor, UndoManager manager,
+                                             InputUndoState state) {
+        for (int calls = 0; ; calls++) {
+            long nextUndo = manager.getNextUndoNanoTime(fileEditor);
+            long nextRedo = manager.getNextRedoNanoTime(fileEditor);
+            if (nextUndo == state.undoNanoTime && nextRedo == state.redoNanoTime) {
+                restoreInputEditorState(editor, state);
+                return editor.getDocument().getModificationStamp() == state.modificationStamp;
+            }
+            if (calls >= INPUT_UNDO_MAX_CALLS || nextUndo != -1 && nextUndo > state.undoNanoTime
+                    || nextRedo == -1
+                    || nextRedo == state.redoNanoTime || nextRedo > state.undoNanoTime
+                    || !manager.isRedoAvailable(fileEditor) || manager.isNextRedoAskConfirmation(fileEditor)) return false;
+            manager.redo(fileEditor);
+        }
+    }
+
     private static void pollSelectedText(String commandId, FocusBridgeService bridge,
                                          String previousText, int elapsedMs) {
         int delayMs = Math.min(SELECTED_TEXT_POLL_INTERVAL_MS, SELECTED_TEXT_MAX_WAIT_MS - elapsedMs);
@@ -298,6 +447,7 @@ final class BridgeCommands {
                 || type.equals("command.queryPythonPackages") || type.equals("command.deleteSelection") || type.equals("command.input") || type.equals("command.ctrlW") || type.equals("command.ctrlShiftW")
                 || type.equals("command.shiftHome") || type.equals("command.home") || type.equals("command.end") || type.equals("command.direction") || type.equals("command.inputTop") || type.equals("command.shiftDown")
                 || type.equals("command.shiftUp") || type.equals("command.moveUpIfLastLine")
+                || type.equals("command.beginInputUndo") || type.equals("command.undoInput")
                 || type.equals("command.executeIdeCommand");
         if (mutating && (targetInstance == null || targetInstance.isBlank())) {
             throw new IllegalArgumentException("target.instanceId is required for this command");
@@ -1006,4 +1156,9 @@ final class BridgeCommands {
     private record Target(Project project, VirtualFile file) {}
     private record Position(int offset) {}
     private record Match(int start, int end) {}
+    private record InputUndoCheckpoint(String token, long createdNanos, WeakReference<Editor> editor,
+                                       WeakReference<Document> document, WeakReference<TextEditor> fileEditor,
+                                       InputUndoState state) {}
+    private record InputUndoState(long modificationStamp, long undoNanoTime, long redoNanoTime,
+                                  List<CaretState> carets, int horizontalScroll, int verticalScroll) {}
 }
