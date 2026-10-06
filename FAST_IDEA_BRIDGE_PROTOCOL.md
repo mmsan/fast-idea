@@ -683,7 +683,7 @@ On success, the response contains `startOffset`, `endOffset`, zero-based `line` 
 
 ### 5.11a `command.input`
 
-要求 `target.instanceId` 和 `payload.text`。在当前活动编辑器的主光标处输入文本；存在选区时替换选区，没有选区时直接插入。`payload.text` 可以为空字符串，表示删除当前选区。
+要求 `target.instanceId` 和 `payload.text`。在当前活动编辑器的主光标处输入文本；存在选区时替换选区，没有选区时直接插入。输入完成后清除选区并把光标放到插入文本末尾。`payload.text` 可以为空字符串，表示删除当前选区。
 
 ```json
 {
