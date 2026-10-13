@@ -42,6 +42,12 @@ intellijPlatform {
 }
 
 tasks {
+    jar {
+        from("LICENSE") {
+            into("META-INF")
+        }
+    }
+
     withType<JavaCompile> {
         options.encoding = "UTF-8"
         options.release.set(17)

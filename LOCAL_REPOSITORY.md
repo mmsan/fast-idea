@@ -40,6 +40,8 @@ http://127.0.0.1:8800/idea-plugins/updatePlugins.xml
 
 ## 发布校验
 
+发布前运行 `.\build-plugin.cmd -Verify` 检查插件包结构, 并使用 JDK 17 和 Gradle 9 运行 `gradle verifyPlugin` 完成 IDE 兼容性校验. `-Verify` 不包含 `verifyPlugin`.
+
 发布脚本会先检查新版本 ZIP 地址是否返回 HTTP 200 且内容长度非零，再切换 `updatePlugins.xml`。切换后还会重新读取 XML，确认版本号和 ZIP 地址一致；如果后续检查失败，会恢复原来的 XML，并清理本次新发布的 ZIP。这样可以避免 IDEA 在更新检查时读到已经发布但暂时下载不到的 ZIP 地址。
 
 首次安装后，在 IDEA 的 **Settings | Plugins | 齿轮菜单** 中启用 **Update Plugins Automatically**。以后只需执行发布脚本，IDEA 会从本地仓库发现版本更高的更新。

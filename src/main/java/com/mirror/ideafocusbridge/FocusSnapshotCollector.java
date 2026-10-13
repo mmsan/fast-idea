@@ -13,7 +13,7 @@ import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.util.TextRange;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.WindowManager;
-import com.intellij.openapi.wm.ex.IdeFrameEx;
+import com.intellij.openapi.wm.IdeFrame;
 import com.intellij.psi.PsiDocumentManager;
 import com.intellij.psi.PsiElement;
 import com.intellij.psi.PsiFile;
@@ -161,14 +161,17 @@ final class FocusSnapshotCollector {
 
     private static boolean isFullScreen(Editor editor) {
         if (editor != null && editor.getProject() != null) {
-            javax.swing.JFrame frame = WindowManager.getInstance().getFrame(editor.getProject());
-            if (frame instanceof IdeFrameEx ideFrame) return ideFrame.isInFullScreen();
+            IdeFrame frame = WindowManager.getInstance().getIdeFrame(editor.getProject());
+            if (frame != null) return frame.isInFullScreen();
         }
         Window active = KeyboardFocusManager.getCurrentKeyboardFocusManager().getActiveWindow();
         if (active != null) {
             for (Project project : ProjectManager.getInstance().getOpenProjects()) {
                 javax.swing.JFrame frame = WindowManager.getInstance().getFrame(project);
-                if (frame == active && frame instanceof IdeFrameEx ideFrame) return ideFrame.isInFullScreen();
+                if (frame == active) {
+                    IdeFrame ideFrame = WindowManager.getInstance().getIdeFrame(project);
+                    if (ideFrame != null) return ideFrame.isInFullScreen();
+                }
             }
         }
         return false;

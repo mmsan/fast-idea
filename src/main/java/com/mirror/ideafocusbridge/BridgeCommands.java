@@ -7,6 +7,7 @@ import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.ActionPlaces;
 import com.intellij.openapi.actionSystem.CommonDataKeys;
 import com.intellij.openapi.actionSystem.AnAction;
+import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.IdeActions;
 import com.intellij.openapi.actionSystem.ex.ActionUtil;
 import com.intellij.openapi.application.ApplicationManager;
@@ -32,8 +33,7 @@ import com.intellij.openapi.vfs.LocalFileSystem;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.IdeFocusManager;
 import com.intellij.openapi.wm.WindowManager;
-import com.intellij.openapi.wm.ex.IdeFrameEx;
-import com.intellij.openapi.wm.ex.WindowManagerEx;
+import com.intellij.openapi.wm.IdeFrame;
 import com.intellij.util.concurrency.AppExecutorUtil;
 import com.sun.jna.Native;
 import com.sun.jna.Pointer;
@@ -740,12 +740,21 @@ final class BridgeCommands {
             return;
         }
 
-        IdeFrameEx ideFrame = ideFrame(project);
+        IdeFrame ideFrame = ideFrame(project);
         if (ideFrame == null) {
             bridge.send("command.result", error("command.fullScreen", "UNSUPPORTED", "Full screen action is unavailable"), id);
             return;
         }
-        if (!ideFrame.isInFullScreen()) ideFrame.toggleFullScreen(true);
+        if (!ideFrame.isInFullScreen()) {
+            AnAction action = ActionManager.getInstance().getAction("ToggleFullScreen");
+            if (action == null || !WindowManager.getInstance().isFullScreenSupportedInCurrentOS()) {
+                bridge.send("command.result", error("command.fullScreen", "UNSUPPORTED", "Full screen action is unavailable"), id);
+                return;
+            }
+            // Invoke synchronously on the EDT so the state check and toggle stay idempotent.
+            ActionUtil.performActionDumbAwareWithCallbacks(action, AnActionEvent.createFromDataContext(ActionPlaces.UNKNOWN, null,
+                    dataId -> CommonDataKeys.PROJECT.is(dataId) ? project : null));
+        }
         bridge.send("command.result", result(true, "command.fullScreen",
                 Map.of("fullScreen", ideFrame.isInFullScreen(), "project", project.getName())), id);
     }
@@ -757,7 +766,7 @@ final class BridgeCommands {
             return;
         }
 
-        IdeFrameEx ideFrame = ideFrame(project);
+        IdeFrame ideFrame = ideFrame(project);
         if (ideFrame == null) {
             bridge.send("command.result", result(true, "command.isFullScreen",
                     Map.of("fullScreen", "unknown", "project", project.getName())), id);
@@ -767,8 +776,9 @@ final class BridgeCommands {
                 Map.of("fullScreen", ideFrame.isInFullScreen(), "project", project.getName())), id);
     }
 
-    private static IdeFrameEx ideFrame(Project project) {
-        return WindowManagerEx.getInstanceEx().findFrameHelper(project);
+    /** Returns the project's frame through the public window manager API. */
+    private static IdeFrame ideFrame(Project project) {
+        return WindowManager.getInstance().getIdeFrame(project);
     }
 
     private static Project resolveProject(JsonObject target) {
