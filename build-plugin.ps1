@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$Verify,
+    [switch]$VerifyCompatibility,
     [string]$ProjectCacheDirectory
 )
 
@@ -8,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = $PSScriptRoot
 $propertiesPath = Join-Path $projectRoot 'gradle.properties'
 $propertiesText = [IO.File]::ReadAllText($propertiesPath)
-$versionMatch = [regex]::Match($propertiesText, '(?m)^pluginVersion=(\d+\.\d+\.\d+)$')
+$versionMatch = [regex]::Match($propertiesText, '(?m)^pluginVersion=(\d+\.\d+\.\d+)\r?$')
 if (-not $versionMatch.Success) { throw 'pluginVersion was not found in gradle.properties.' }
 $version = $versionMatch.Groups[1].Value
 
@@ -28,7 +29,8 @@ $javaMajor = $javaMajorMatch.Groups[1].Value
 $localGradle = Join-Path $projectRoot '.gradle-dist\gradle-9.0.0\bin\gradle.bat'
 $gradleCommand = if (Test-Path -LiteralPath $localGradle) { $localGradle } else { Join-Path $projectRoot 'gradlew.bat' }
 $tasks = @('buildPlugin')
-if ($Verify) { $tasks += @('verifyPluginProjectConfiguration', 'verifyPluginStructure') }
+if ($Verify -or $VerifyCompatibility) { $tasks += @('verifyPluginProjectConfiguration', 'verifyPluginStructure') }
+if ($VerifyCompatibility) { $tasks += 'verifyPlugin' }
 $projectCacheDirectoryForBuild = if ([string]::IsNullOrWhiteSpace($ProjectCacheDirectory)) {
     Join-Path $projectRoot '.intellijPlatform-build\gradle-cache'
 } else {
@@ -36,6 +38,11 @@ $projectCacheDirectoryForBuild = if ([string]::IsNullOrWhiteSpace($ProjectCacheD
 }
 New-Item -ItemType Directory -Path $projectCacheDirectoryForBuild -Force | Out-Null
 $gradleArguments = @($tasks + @('--project-cache-dir', $projectCacheDirectoryForBuild))
+if ($env:HTTPS_PROXY) {
+    $buildProxy = [uri]$env:HTTPS_PROXY
+    $gradleArguments += @("-Dhttps.proxyHost=$($buildProxy.Host)", "-Dhttps.proxyPort=$($buildProxy.Port)",
+        "-Dhttp.proxyHost=$($buildProxy.Host)", "-Dhttp.proxyPort=$($buildProxy.Port)")
+}
 
 $previousJavaHome = $env:JAVA_HOME
 try {
