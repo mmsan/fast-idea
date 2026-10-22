@@ -541,6 +541,8 @@ final class BridgeCommands {
             caret.setSelection(lineStartOffset, originalOffset);
             moved = true;
         }
+        // This acknowledged selection is current even when its text matches the previous query.
+        if (moved) lastSelectedText = null;
         bridge.send("command.result", result(true, "command.shiftHome", Map.of("handled", moved)), id);
     }
 
