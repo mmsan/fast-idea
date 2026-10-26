@@ -2,7 +2,15 @@
 
 本文档描述 Fast Idea Bridge 插件与 Fast 应用的 Node.js WebSocket 服务之间的消息协议。
 
-默认连接地址：`ws://127.0.0.1:9072`
+连接由 Windows Host 自动授权, 无需手工输入 token. 插件从当前用户的 `%LOCALAPPDATA%/FastGoTo/BrowserBridge/Native/bridge-host-v2.json` 读取非秘密发现信息, 拒绝重解析点、非本地路径和超大/格式错误数据, 并在同一命名管道句柄上核对真实服务端 PID、Windows 会话及打开后规范化的 `FastGoTo.exe` 映像路径. 管道请求使用 `client: "idea"`, 返回的 `peerPid` 必须等于当前 JVM PID. 原有 endpoint/token 设置保留兼容存储, 不参与自动连接, 不能绕过本地授权. 非 Windows、旧版服务和 Bearer-only 连接均不降级放行.
+
+Host 返回当前获准运行时的端口和仅驻留内存的一次性短期 ticket/key. 每次重连重新申请, 原有 1 秒 WebSocket 连接、2 秒 ping、6 秒 pong 和 200/500/1000/2000 ms 重连节奏不变.
+
+认证传输使用 protocol 2. 客户端依次发送 `bridgeHello`, 校验 `bridgeChallenge` 的服务端 HMAC, 发送 `bridgeProof`, 接受加密的 `bridgeReady` 后才发送 `bridge.hello`、编辑器状态或处理命令. 认证限时 5 秒, 不向尚未验证的服务端发送编辑器身份或数据.
+
+HMAC-SHA256 输入为 UTF-8 紧凑 JSON `[purpose,"idea",peerPid,ticket,expires,clientNonce,serverNonce]`, purpose 分别为 `server`、`client`、`serverToClient`、`clientToServer`. nonce/ticket/key/proof 均为 32 字节小写十六进制. 应用消息封装为 `{type:"bridgeFrame",sequence,ciphertext}`: 两方向序号独立从 1 开始逐次加 1, AES-256-GCM IV 为 4 个零字节加大端 64 位序号, AAD 为 UTF-8 紧凑 JSON `["fast-local-bridge-v2",direction,sequence]`, ciphertext 为密文及 16 字节 tag 的规范 Base64. 单条明文上限 2 MiB, 待发队列最多 16 条且合计不超过 4 MiB. 任何证明、认证 tag、顺序、格式或队列校验失败均关闭连接, 不回退明文协议. 关闭或替换连接会清除临时密钥.
+
+以下 JSON 描述解密后的应用层消息, 其 `version: 1`、精确实例/项目定位、文本共享设置与现有命令语义保持不变. 完整跨端传输规范由 Host 的 `docs/local-bridge-auth.md` 定义.
 
 插件发送的消息是 JSON 文本。除特别说明外，所有消息都使用下面的统一结构：
 
@@ -71,7 +79,7 @@
 
 ### 3.1 `bridge.hello`
 
-WebSocket 连接建立后发送一次，用于识别这是 Fast Idea Bridge 插件，并提供客户端能力和窗口信息。
+WebSocket 完成双向认证并收到加密的 `bridgeReady` 后发送一次，用于识别这是 Fast Idea Bridge 插件，并提供客户端能力和窗口信息。
 
 ```json
 {

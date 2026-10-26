@@ -1,8 +1,6 @@
 package com.mirror.ideafocusbridge;
 
 import com.google.gson.Gson;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.components.Service;
@@ -11,13 +9,13 @@ import com.intellij.openapi.editor.event.CaretEvent;
 import com.intellij.openapi.editor.event.CaretListener;
 import com.intellij.openapi.editor.event.DocumentEvent;
 import com.intellij.openapi.editor.event.DocumentListener;
-import com.intellij.openapi.util.Disposer;
 
 import java.awt.*;
 import java.awt.event.AWTEventListener;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseEvent;
 import java.beans.PropertyChangeListener;
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
@@ -54,6 +52,7 @@ public final class FocusBridgeService implements Disposable {
     private final String instanceId = UUID.randomUUID().toString();
     private volatile String connectionId = UUID.randomUUID().toString();
     private volatile WebSocket socket;
+    private volatile SocketListener connection;
     private volatile ScheduledFuture<?> pendingSnapshot;
     private volatile ScheduledFuture<?> pendingStatus;
     private volatile String lastStatusSignature;
@@ -112,26 +111,40 @@ public final class FocusBridgeService implements Disposable {
         reconnectAttempt = 0;
         reconnectStartedAt = 0;
         slowReconnectLogged = false;
-        WebSocket old = socket; socket = null;
-        if (old != null) old.sendClose(WebSocket.NORMAL_CLOSURE, "settings changed");
+        SocketListener old = connection;
+        if (old != null) old.close();
         if (FocusBridgeSettings.getInstance().data().autoConnect) connect();
     }
 
+    /** Acquires Windows admission in the background before opening the authenticated local socket. */
     private void connect() {
         long expectedGeneration = generation.get();
-        URI uri;
-        try { uri = URI.create(FocusBridgeSettings.getInstance().websocketUrl()); }
-        catch (RuntimeException e) { BridgeLog.warn("invalid WebSocket URL", e); return; }
-
-        WebSocket.Builder builder = httpClient.newWebSocketBuilder().connectTimeout(Duration.ofSeconds(1));
-        String token = FocusBridgeSettings.getInstance().data().token;
-        if (token != null && !token.isBlank()) builder.header("Authorization", "Bearer " + token);
-        builder.header("X-Idea-Bridge-Version", "1");
-        builder.buildAsync(uri, new SocketListener(expectedGeneration)).whenComplete((ws, error) -> {
-            if (error != null && expectedGeneration == generation.get()) {
-                recordConnectionFailure("connection failed", error);
-                scheduleReconnect(expectedGeneration);
+        runBackground(() -> {
+            if (expectedGeneration != generation.get()) return;
+            BridgeAuthentication authentication;
+            try {
+                authentication = BridgeAuthentication.bootstrap();
+            } catch (IOException | RuntimeException | LinkageError error) {
+                if (expectedGeneration == generation.get()) {
+                    recordConnectionFailure("local bridge admission unavailable", null);
+                    scheduleReconnect(expectedGeneration);
+                }
+                return;
             }
+            SocketListener candidate = new SocketListener(expectedGeneration, authentication);
+            SocketListener previous = connection;
+            if (previous != null) previous.close();
+            connection = candidate;
+            if (expectedGeneration != generation.get()) {
+                candidate.close();
+                return;
+            }
+            URI uri = URI.create("ws://127.0.0.1:" + authentication.port());
+            httpClient.newWebSocketBuilder().connectTimeout(Duration.ofSeconds(1))
+                    .header("X-Idea-Bridge-Version", "2").buildAsync(uri, candidate)
+                    .whenComplete((ws, error) -> {
+                        if (error != null) candidate.fail("authenticated connection failed");
+                    });
         });
     }
 
@@ -180,18 +193,14 @@ public final class FocusBridgeService implements Disposable {
         if (ws == null || ws.isOutputClosed()) return;
         long now = System.currentTimeMillis();
         if (lastPongMillis > 0 && now - lastPongMillis > 6_000) {
-            if (socket == ws) socket = null;
-            ws.abort();
-            recordConnectionFailure("heartbeat timeout; reconnecting", null);
-            scheduleReconnect(generation.get());
+            SocketListener current = connection;
+            if (current != null && current.webSocket == ws) current.fail("heartbeat timeout; reconnecting");
             return;
         }
         ByteBuffer ping = ByteBuffer.allocate(Long.BYTES).putLong(now).flip();
         ws.sendPing(ping).exceptionally(error -> {
-            if (socket == ws) socket = null;
-            ws.abort();
-            recordConnectionFailure("ping failed; reconnecting", error);
-            scheduleReconnect(generation.get());
+            SocketListener current = connection;
+            if (current != null && current.webSocket == ws) current.fail("ping failed; reconnecting");
             return null;
         });
     }
@@ -230,28 +239,76 @@ public final class FocusBridgeService implements Disposable {
         message.put("type", type); message.put("timestamp", System.currentTimeMillis());
         message.put("sequence", sequence.incrementAndGet()); message.put("payload", payload);
         message.put("source", BridgeCommands.source(instanceId, connectionId, payload));
-        ws.sendText(gson.toJson(message), true).exceptionally(error -> {
-            logConnectionEvent("send:" + type, "message send failed; type=" + type, error, true);
-            return null;
-        });
+        SocketListener current = connection;
+        if (current != null && current.webSocket == ws) current.sendApplication(message);
     }
 
     private final class SocketListener implements WebSocket.Listener {
+        private static final int MAX_PENDING_MESSAGES = 16;
+        private static final int MAX_PENDING_BYTES = 4 * 1024 * 1024;
         private final long expectedGeneration;
+        private final BridgeAuthentication authentication;
         private final StringBuilder incoming = new StringBuilder();
-        SocketListener(long expectedGeneration) { this.expectedGeneration = expectedGeneration; }
+        private final AtomicBoolean closed = new AtomicBoolean();
+        private final AtomicInteger pendingMessages = new AtomicInteger();
+        private CompletableFuture<Void> sendTail = CompletableFuture.completedFuture(null);
+        private volatile WebSocket webSocket;
+        private volatile boolean authenticated;
+        private volatile ScheduledFuture<?> authenticationTimeout;
+        private volatile long authenticationDeadlineNanos;
+        private int pendingBytes;
 
+        /** Associates one fresh bootstrap with one reconnect generation. */
+        SocketListener(long expectedGeneration, BridgeAuthentication authentication) {
+            this.expectedGeneration = expectedGeneration;
+            this.authentication = authentication;
+        }
+
+        /** Starts a bounded mutual proof without publishing an application-ready socket. */
         @Override public void onOpen(WebSocket webSocket) {
-            if (expectedGeneration != generation.get()) { webSocket.abort(); return; }
+            this.webSocket = webSocket;
+            if (closed.get() || expectedGeneration != generation.get() || connection != this) {
+                webSocket.abort();
+                close();
+                return;
+            }
+            try {
+                authenticationDeadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                authenticationTimeout = executor.schedule(() -> fail("bridge authentication timed out"),
+                        5, TimeUnit.SECONDS);
+                sendControl(authentication.hello());
+                webSocket.request(1);
+            } catch (IOException | RuntimeException error) {
+                fail("bridge authentication rejected");
+            }
+        }
+
+        /** Publishes editor identity and a complete state only after encrypted readiness. */
+        private synchronized void authenticated() {
+            if (System.nanoTime() >= authenticationDeadlineNanos) {
+                fail("bridge authentication timed out");
+                return;
+            }
+            if (closed.get() || expectedGeneration != generation.get() || connection != this) {
+                close();
+                return;
+            }
+            authenticated = true;
+            ScheduledFuture<?> timeout = authenticationTimeout;
+            if (timeout != null) timeout.cancel(false);
             connectionId = UUID.randomUUID().toString();
-            socket = webSocket; reconnectAttempt = 0; reconnectScheduled.set(false);
-            reconnectStartedAt = 0; slowReconnectLogged = false;
+            socket = webSocket;
+            reconnectAttempt = 0;
+            reconnectScheduled.set(false);
+            reconnectStartedAt = 0;
+            slowReconnectLogged = false;
             lastStatusSignature = null;
             int failures = connectionFailures.getAndSet(0);
             boolean firstBridgeHandshake = startupFullscreenHandshakeSent.compareAndSet(false, true);
-            BridgeLog.info("connected" + (failures > 0 ? "; recoveredAfterFailures=" + failures : ""));
+            BridgeLog.info("authenticated connection" + (failures > 0 ? "; recoveredAfterFailures=" + failures : ""));
             lastPongMillis = System.currentTimeMillis();
             ApplicationManager.getApplication().invokeLater(() -> {
+                if (closed.get() || socket != webSocket) return;
                 Map<String, Object> identity = BridgeCommands.identity();
                 if (firstBridgeHandshake) {
                     identity.put("startupFullScreenUntil", System.currentTimeMillis() + STARTUP_FULLSCREEN_WINDOW_MS);
@@ -260,46 +317,159 @@ public final class FocusBridgeService implements Disposable {
                 scheduleSnapshot("editor.state", 0);
                 scheduleStatus(0);
             });
-            webSocket.request(1);
         }
 
+        /** Serializes the two small proof messages with any following encrypted sends. */
+        private synchronized void sendControl(String raw) {
+            sendTail = sendTail.thenCompose(ignored -> {
+                if (closed.get()) return CompletableFuture.failedFuture(new IOException("Bridge closed"));
+                return webSocket.sendText(raw, true).thenApply(ws -> (Void) null);
+            }).whenComplete((ignored, error) -> {
+                if (error != null) fail("bridge authentication send failed");
+            });
+        }
+
+        /** Bounds queued application work before serializing it outside the EDT. */
+        private void sendApplication(Map<String, Object> message) {
+            if (!authenticated || closed.get()) return;
+            if (pendingMessages.incrementAndGet() > MAX_PENDING_MESSAGES) {
+                pendingMessages.decrementAndGet();
+                fail("bridge send queue exceeded");
+                return;
+            }
+            try {
+                executor.execute(() -> {
+                    try {
+                        enqueue(gson.toJson(message));
+                    } catch (IOException | RuntimeException error) {
+                        pendingMessages.decrementAndGet();
+                        fail("bridge message send rejected");
+                    }
+                });
+            } catch (RejectedExecutionException error) {
+                pendingMessages.decrementAndGet();
+                close();
+            }
+        }
+
+        /** Preserves frame order and bounds aggregate plaintext awaiting socket writes. */
+        private synchronized void enqueue(String raw) throws IOException {
+            if (closed.get()) {
+                pendingMessages.decrementAndGet();
+                return;
+            }
+            int bytes = raw.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            if (bytes > BridgeAuthentication.MAX_PLAINTEXT || pendingBytes + bytes > MAX_PENDING_BYTES) {
+                throw new IOException("Bridge send queue exceeded");
+            }
+            pendingBytes += bytes;
+            sendTail = sendTail.thenCompose(ignored -> {
+                if (closed.get()) return CompletableFuture.failedFuture(new IOException("Bridge closed"));
+                try {
+                    return webSocket.sendText(authentication.encrypt(raw), true).thenApply(ws -> (Void) null);
+                } catch (IOException error) {
+                    return CompletableFuture.failedFuture(error);
+                }
+            }).whenComplete((ignored, error) -> {
+                synchronized (this) {
+                    pendingBytes -= bytes;
+                }
+                pendingMessages.decrementAndGet();
+                if (error != null) fail("bridge message send failed");
+            });
+        }
+
+        /** Authenticates each bounded message before dispatching any command. */
         @Override public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
-            if (incoming.length() + data.length() > 1_048_576) {
+            if (closed.get()) return CompletableFuture.completedFuture(null);
+            if (!authenticated && System.nanoTime() >= authenticationDeadlineNanos) {
+                fail("bridge authentication timed out");
+                return CompletableFuture.completedFuture(null);
+            }
+            int limit = authenticated ? BridgeAuthentication.MAX_FRAME_CHARACTERS : 4_096;
+            if (incoming.length() + (long) data.length() > limit) {
                 incoming.setLength(0);
-                webSocket.sendClose(WebSocket.NORMAL_CLOSURE, "message too large");
+                fail("bridge message too large");
                 return CompletableFuture.completedFuture(null);
             }
             incoming.append(data);
             if (last) {
-                String message = incoming.toString(); incoming.setLength(0);
-                BridgeCommands.handle(message, FocusBridgeService.this);
+                String message = incoming.toString();
+                incoming.setLength(0);
+                try {
+                    if (!authentication.hasServerProof()) {
+                        sendControl(authentication.proveServer(message));
+                    } else {
+                        String plaintext = authentication.decrypt(message);
+                        if (!authenticated) {
+                            authentication.acceptReady(plaintext);
+                            authenticated();
+                        } else {
+                            BridgeCommands.handle(plaintext, FocusBridgeService.this);
+                        }
+                    }
+                } catch (IOException | RuntimeException error) {
+                    fail("bridge message authentication rejected");
+                }
             }
-            webSocket.request(1);
+            if (!closed.get()) webSocket.request(1);
             return CompletableFuture.completedFuture(null);
         }
 
-        @Override public CompletionStage<?> onPing(WebSocket webSocket, java.nio.ByteBuffer message) {
-            lastPongMillis = System.currentTimeMillis();
-            webSocket.request(1); return webSocket.sendPong(message);
+        /** Rejects binary traffic because the authenticated wire format is JSON text. */
+        @Override public CompletionStage<?> onBinary(WebSocket webSocket, ByteBuffer message, boolean last) {
+            fail("unsupported bridge frame");
+            return CompletableFuture.completedFuture(null);
         }
 
+        /** Retains the existing transport ping behavior without application data. */
+        @Override public CompletionStage<?> onPing(WebSocket webSocket, ByteBuffer message) {
+            if (authenticated && socket == webSocket) lastPongMillis = System.currentTimeMillis();
+            webSocket.request(1);
+            return webSocket.sendPong(message);
+        }
+
+        /** Retains the existing pong freshness check after authentication. */
         @Override public CompletionStage<?> onPong(WebSocket webSocket, ByteBuffer message) {
-            lastPongMillis = System.currentTimeMillis();
+            if (authenticated && socket == webSocket) lastPongMillis = System.currentTimeMillis();
             webSocket.request(1);
             return CompletableFuture.completedFuture(null);
         }
 
+        /** Drops credentials and reconnects without recording peer-controlled close text. */
         @Override public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
-            if (socket == webSocket) socket = null;
-            logConnectionEvent("closed", "connection closed; code=" + statusCode + "; reason=" + reason, null, false);
-            scheduleReconnect(expectedGeneration);
+            if (close() && expectedGeneration == generation.get()) {
+                logConnectionEvent("closed", "connection closed; code=" + statusCode, null, false);
+                scheduleReconnect(expectedGeneration);
+            }
             return CompletableFuture.completedFuture(null);
         }
 
+        /** Treats transport errors as connection failure without logging protocol payloads. */
         @Override public void onError(WebSocket webSocket, Throwable error) {
-            if (socket == webSocket) socket = null;
-            recordConnectionFailure("socket error", error);
-            scheduleReconnect(expectedGeneration);
+            fail("socket error");
+        }
+
+        /** Fails closed once and uses the unchanged reconnect schedule. */
+        private void fail(String message) {
+            if (close() && expectedGeneration == generation.get()) {
+                recordConnectionFailure(message, null);
+                scheduleReconnect(expectedGeneration);
+            }
+        }
+
+        /** Erases ephemeral keys and aborts pending or established transport on disposal. */
+        private synchronized boolean close() {
+            if (!closed.compareAndSet(false, true)) return false;
+            authenticated = false;
+            ScheduledFuture<?> timeout = authenticationTimeout;
+            if (timeout != null) timeout.cancel(false);
+            authentication.close();
+            WebSocket ws = webSocket;
+            if (socket == ws) socket = null;
+            if (connection == this) connection = null;
+            if (ws != null) ws.abort();
+            return true;
         }
     }
 
@@ -314,8 +484,8 @@ public final class FocusBridgeService implements Disposable {
         if (focusListener != null) KeyboardFocusManager.getCurrentKeyboardFocusManager()
                 .removePropertyChangeListener("permanentFocusOwner", focusListener);
         if (inputListener != null) Toolkit.getDefaultToolkit().removeAWTEventListener(inputListener);
-        WebSocket ws = socket; socket = null;
-        if (ws != null) ws.sendClose(WebSocket.NORMAL_CLOSURE, "plugin disposed");
+        SocketListener current = connection;
+        if (current != null) current.close();
         BridgeLog.info("service disposed");
         localPluginUpdateChecker.dispose();
         executor.shutdownNow();
