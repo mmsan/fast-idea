@@ -58,7 +58,6 @@ public final class FocusBridgeService implements Disposable {
     private volatile String lastStatusSignature;
     private volatile int reconnectAttempt;
     private volatile long reconnectStartedAt;
-    private volatile boolean slowReconnectLogged;
     private volatile long lastPongMillis;
     private PropertyChangeListener focusListener;
     private AWTEventListener inputListener;
@@ -110,7 +109,6 @@ public final class FocusBridgeService implements Disposable {
         reconnectScheduled.set(false);
         reconnectAttempt = 0;
         reconnectStartedAt = 0;
-        slowReconnectLogged = false;
         SocketListener old = connection;
         if (old != null) old.close();
         if (FocusBridgeSettings.getInstance().data().autoConnect) connect();
@@ -150,7 +148,11 @@ public final class FocusBridgeService implements Disposable {
 
     private void recordConnectionFailure(String message, Throwable error) {
         int count = connectionFailures.incrementAndGet();
-        logConnectionEvent("failure", message + "; attempt=" + count, error, true);
+        if (message.equals("local bridge admission unavailable") || message.equals("authenticated connection failed") || message.equals("socket error")) {
+            if (count == 1) BridgeLog.warn(message + "; attempt=" + count, error);
+        } else {
+            logConnectionEvent(message, message + "; attempt=" + count, error, true);
+        }
     }
 
     private synchronized void logConnectionEvent(String kind, String message, Throwable error, boolean warning) {
@@ -177,11 +179,6 @@ public final class FocusBridgeService implements Disposable {
         long delay = retryingForMs >= SLOW_RECONNECT_AFTER_MS
                 ? SLOW_RECONNECT_DELAY_MS
                 : delays[Math.min(reconnectAttempt++, delays.length - 1)];
-        if (delay == SLOW_RECONNECT_DELAY_MS && !slowReconnectLogged) {
-            slowReconnectLogged = true;
-            BridgeLog.info("connection remains unavailable for " + retryingForMs / 1_000
-                    + "s; retry delay increased to " + SLOW_RECONNECT_DELAY_MS + "ms");
-        }
         executor.schedule(() -> {
             reconnectScheduled.set(false);
             if (expectedGeneration == generation.get()) connect();
@@ -301,7 +298,6 @@ public final class FocusBridgeService implements Disposable {
             reconnectAttempt = 0;
             reconnectScheduled.set(false);
             reconnectStartedAt = 0;
-            slowReconnectLogged = false;
             lastStatusSignature = null;
             int failures = connectionFailures.getAndSet(0);
             boolean firstBridgeHandshake = startupFullscreenHandshakeSent.compareAndSet(false, true);
